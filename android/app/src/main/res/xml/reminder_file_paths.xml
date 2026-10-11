@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Exposes the app's sounds library to the OS audio system as content:// URIs.
+
+  The library lives in getApplicationSupportDirectory(), which on Android is
+  Context.getFilesDir() = /data/user/0/<applicationId>/files — exactly what
+  <files-path> is relative to, so no package name is hardcoded here and a
+  secondary-user profile or an applicationIdSuffix still resolves (the
+  matching ${applicationId}.reminder_sounds authority moves with it).
+
+  The documents directory would not: getApplicationDocumentsDirectory() is
+  Context.getDir("flutter") = /data/user/0/<pkg>/app_flutter, unreachable by
+  <files-path>, so it can only be served by a <root-path> pinned to that exact
+  string — a wide root, broken by the same two things.
+
+  <files-path> is FileProvider's narrowest root and the one FileProvider's own
+  SimplePathStrategy can be satisfied with: it canonicalizes both sides and
+  requires the target to sit under the root, so a sibling sounds_evil/ next to
+  sounds/ no longer passes a prefix check. Sharing this one subdirectory is the
+  whole point — no other app data is reachable through it.
+-->
+<paths xmlns:android="http://schemas.android.com/apk/res/android">
+    <files-path name="reminder_sounds" path="sounds/" />
+</paths>
