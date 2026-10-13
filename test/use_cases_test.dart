@@ -20,20 +20,22 @@ import 'package:reminder_app/presentation/bloc/reminder_cubit.dart';
 /// sorts by it and [delete] hands it back, so the ordering rules under test are
 /// the real ones, gaps and all.
 class _FakeStore implements ReminderStore {
-  _FakeStore([Map<String, int>? seeded]) {
+  _FakeStore([Map<String, int>? seeded, List<String>? callLog])
+    : calls = callLog ?? [] {
     for (final entry in (seeded ?? const <String, int>{}).entries) {
       rows.add(ReminderRow.toRow(_reminder(id: entry.key, title: entry.key)));
       _orders[entry.key] = entry.value;
     }
   }
 
-  final List<String> calls = [];
+  final List<String> calls;
   final List<Map<String, Object?>> rows = [];
   final List<int?> orders = [];
   final Map<String, int> _orders = {};
 
   /// Flipped by the failure test; there is no sqflite to make fail for real.
   bool failWrites = false;
+  bool failDelete = false;
 
   @override
   Future<List<Map<String, Object?>>> readAll() async {
@@ -63,6 +65,7 @@ class _FakeStore implements ReminderStore {
   @override
   Future<int?> delete(String id) async {
     calls.add('delete');
+    if (failDelete) throw StateError('delete failed');
     rows.removeWhere((r) => r['id'] == id);
     return _orders.remove(id);
   }
@@ -73,11 +76,20 @@ class _FakeScheduler implements ReminderScheduler {
 
   final List<String> calls;
 
-  @override
-  Future<void> schedule(Reminder reminder) async => calls.add('schedule');
+  bool failSchedule = false;
+  bool failCancel = false;
 
   @override
-  Future<void> cancel(String reminderId) async => calls.add('cancel');
+  Future<void> schedule(Reminder reminder) async {
+    calls.add('schedule');
+    if (failSchedule) throw StateError('schedule failed');
+  }
+
+  @override
+  Future<void> cancel(String reminderId) async {
+    calls.add('cancel');
+    if (failCancel) throw StateError('cancel failed');
+  }
 
   @override
   Future<SoundResolution> soundResolution(Reminder reminder) async =>
@@ -87,7 +99,36 @@ class _FakeScheduler implements ReminderScheduler {
 Reminder _reminder({String id = 'r1', String title = 'Water plants'}) =>
     Reminder(id: id, title: title, hour: 9, minute: 0);
 
+class _DeniedScheduler extends _FakeScheduler
+    implements NotificationPermissions {
+  _DeniedScheduler(super.calls);
+
+  @override
+  Future<NotificationPermissionStatus> checkPermissions() async =>
+      NotificationPermissionStatus.notificationsDenied;
+  @override
+  Future<NotificationPermissionStatus> requestPermissions() =>
+      checkPermissions();
+  @override
+  Future<void> openNotificationSettings() async {}
+}
+
 void main() {
+  test(
+    'failed deletion pauses the row when permissions prevent restoring alerts',
+    () async {
+      final store = _FakeStore({'r1': 0})..failDelete = true;
+      final repository = SqfliteReminderRepository(
+        database: store,
+        scheduler: _DeniedScheduler([]),
+      );
+      await expectLater(
+        repository.delete('r1'),
+        throwsA(isA<ReminderSchedulingException>()),
+      );
+      expect((await repository.getAll()).single.isEnabled, isFalse);
+    },
+  );
   // The write-then-schedule invariant and the undo sortOrder pin are the only
   // two pieces of logic here that are not a straight pass-through, so they are
   // the only two worth a test.
@@ -95,8 +136,8 @@ void main() {
     test(
       'upsert writes the row before it schedules the notification',
       () async {
-        final store = _FakeStore();
         final calls = <String>[];
+        final store = _FakeStore(null, calls);
         final repository = SqfliteReminderRepository(
           database: store,
           scheduler: _FakeScheduler(calls),
@@ -104,10 +145,8 @@ void main() {
 
         await repository.upsert(_reminder());
 
-        expect(store.calls, ['write']);
-        expect(calls, ['schedule']);
         expect(
-          [...store.calls, ...calls],
+          calls,
           ['write', 'schedule'],
           reason:
               'reversed, a crash between the two leaves a notification for a '
@@ -117,10 +156,10 @@ void main() {
     );
 
     test(
-      'delete removes the row before it cancels the notifications',
+      'delete cancels notifications before removing the row',
       () async {
-        final store = _FakeStore();
         final calls = <String>[];
+        final store = _FakeStore(null, calls);
         final repository = SqfliteReminderRepository(
           database: store,
           scheduler: _FakeScheduler(calls),
@@ -128,7 +167,7 @@ void main() {
 
         await repository.delete('r1');
 
-        expect([...store.calls, ...calls], ['delete', 'cancel']);
+        expect(calls, ['readAll', 'cancel', 'delete']);
       },
     );
 
@@ -138,8 +177,8 @@ void main() {
     // app funnels through this one path and none of them can skip the half it
     // did not implement.
     test('both writers share that one path', () async {
-      final store = _FakeStore();
       final calls = <String>[];
+      final store = _FakeStore(null, calls);
       final repository = SqfliteReminderRepository(
         database: store,
         scheduler: _FakeScheduler(calls),
@@ -152,11 +191,11 @@ void main() {
 
       // Two writes, two schedules, in that interleaved order.
       expect(
-        [...store.calls, ...calls],
+        calls,
         [
           'write',
-          'write',
           'schedule',
+          'write',
           'schedule',
         ],
       );
@@ -176,6 +215,89 @@ void main() {
         expect((await repository.getAll()).single.isEnabled, isFalse);
       },
     );
+
+    test(
+      'failed scheduling cancels partial alerts and persists a disabled draft',
+      () async {
+        final calls = <String>[];
+        final store = _FakeStore(null, calls);
+        final scheduler = _FakeScheduler(calls)..failSchedule = true;
+        final repository = SqfliteReminderRepository(
+          database: store,
+          scheduler: scheduler,
+        );
+        await expectLater(
+          repository.upsert(_reminder()),
+          throwsA(isA<ReminderSchedulingException>()),
+        );
+        expect(calls, ['write', 'schedule', 'cancel', 'write']);
+        expect((await repository.getAll()).single.isEnabled, isFalse);
+      },
+    );
+
+    test('failed cleanup reports that old alerts may still fire', () async {
+      final store = _FakeStore();
+      final scheduler = _FakeScheduler([])
+        ..failSchedule = true
+        ..failCancel = true;
+      final repository = SqfliteReminderRepository(
+        database: store,
+        scheduler: scheduler,
+      );
+      await expectLater(
+        repository.upsert(_reminder()),
+        throwsA(
+          isA<ReminderSchedulingException>().having(
+            (e) => e.message,
+            'message',
+            contains('may still fire'),
+          ),
+        ),
+      );
+      expect((await repository.getAll()).single.isEnabled, isFalse);
+    });
+
+    test('failed cancellation retains the row for deletion retry', () async {
+      final store = _FakeStore({'r1': 0});
+      final scheduler = _FakeScheduler([])..failCancel = true;
+      final repository = SqfliteReminderRepository(
+        database: store,
+        scheduler: scheduler,
+      );
+      await expectLater(repository.delete('r1'), throwsStateError);
+      expect((await repository.getAll()).single.id, 'r1');
+    });
+
+    test('cubit reloads disabled persisted draft and returns false after scheduling failure', () async {
+      final store = _FakeStore();
+      final scheduler = _FakeScheduler([])..failSchedule = true;
+      final repository = SqfliteReminderRepository(
+        database: store,
+        scheduler: scheduler,
+      );
+      final cubit = ReminderCubit(
+        loadReminders: LoadReminders(repository),
+        addReminder: AddReminder(repository),
+        deleteReminder: DeleteReminder(repository),
+        toggleReminder: ToggleReminder(repository),
+      );
+      addTearDown(cubit.close);
+      expect(await cubit.add(_reminder()), isFalse);
+      expect(cubit.state.reminders.single.isEnabled, isFalse);
+      expect(cubit.state.error, isA<ReminderSchedulingException>());
+    });
+
+    test('failed database deletion restores the previous schedule', () async {
+      final calls = <String>[];
+      final store = _FakeStore({'r1': 0}, calls)..failDelete = true;
+      final repository = SqfliteReminderRepository(
+        database: store,
+        scheduler: _FakeScheduler(calls),
+      );
+      await expectLater(repository.delete('r1'), throwsStateError);
+      expect(calls, ['readAll', 'cancel', 'delete', 'write', 'schedule']);
+      expect((await repository.getAll()).single.isEnabled, isTrue);
+    });
 
     test('getAll maps rows back to entities', () async {
       final store = _FakeStore();

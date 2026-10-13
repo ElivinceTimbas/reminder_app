@@ -28,6 +28,13 @@ void main() {
       final next = at(12, 0).nextOccurrence(from: tuesdayNoon);
       expect(next, DateTime(2026, 9, 30, 12, 0));
     });
+
+    test('keeps the selected wall-clock time across a calendar day', () {
+      // Run with TZ=America/New_York as well to cover the spring DST change.
+      final next = at(9, 0).nextOccurrence(from: DateTime(2026, 3, 7, 12));
+      expect(next, DateTime(2026, 3, 8, 9));
+      expect(next.hour, 9);
+    });
   });
 
   group('nextOccurrence with weekdays', () {

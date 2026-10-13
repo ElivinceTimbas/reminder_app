@@ -4,14 +4,8 @@ import '../../domain/repositories/reminder_scheduler.dart';
 import '../datasources/reminder_local_data_source.dart';
 import '../models/reminder_row.dart';
 
-/// sqflite + OS notifications behind the domain's [ReminderRepository].
-///
-/// This is the ONE place the write-then-schedule invariant is implemented, and
-/// the reason it lives here rather than in `AddReminder`/`ToggleReminder` is
-/// the second one: two writers, one fact. Every write
-/// path in the app has to pass through this class for the store to stay
-/// consistent, and that is not something a use case can promise about a use
-/// case written after it.
+/// Persists reminders and reconciles their OS notifications.
+/// Failed schedules remain visible as disabled drafts for retry.
 class SqfliteReminderRepository implements ReminderRepository {
   const SqfliteReminderRepository({
     required this._database,
@@ -27,14 +21,71 @@ class SqfliteReminderRepository implements ReminderRepository {
 
   @override
   Future<void> upsert(Reminder reminder, {int? sortOrder}) async {
+    if (reminder.isEnabled && _scheduler is NotificationPermissions) {
+      final status = await (_scheduler as NotificationPermissions)
+          .checkPermissions();
+      if (status != NotificationPermissionStatus.allowed) {
+        throw const ReminderSchedulingException(
+          'Alert access is unavailable. Enable notifications and alarms in settings, then retry.',
+        );
+      }
+    }
+    if (reminder.isEnabled && _scheduler is ReminderScheduleValidation) {
+      await (_scheduler as ReminderScheduleValidation).validateSchedule(
+        reminder,
+      );
+    }
     await _database.write(ReminderRow.toRow(reminder), sortOrder: sortOrder);
-    await _scheduler.schedule(reminder);
+    try {
+      await _scheduler.schedule(reminder);
+    } on Object {
+      var cancelled = false;
+      try {
+        await _scheduler.cancel(reminder.id);
+        cancelled = true;
+      } on Object {
+        // Keep the cancellation failure visible in the recovery message.
+      }
+      await _database.write(
+        ReminderRow.toRow(reminder.copyWith(isEnabled: false)),
+        sortOrder: sortOrder,
+      );
+      throw ReminderSchedulingException(
+        cancelled
+            ? 'The alert could not be scheduled. Your reminder was saved paused. Retry here, or turn it on from the reminder list.'
+            : 'The alert could not be updated. Your reminder was saved paused; existing alerts may still fire. Retry here, or turn it on from the reminder list.',
+      );
+    }
   }
 
   @override
   Future<int?> delete(String id) async {
-    final order = await _database.delete(id);
+    final previous = (await getAll()).where((r) => r.id == id).firstOrNull;
+    // Keep the row when cancellation fails so the user can retry deleting it.
     await _scheduler.cancel(id);
-    return order;
+    try {
+      return await _database.delete(id);
+    } on Object {
+      if (previous != null) {
+        try {
+          await upsert(previous);
+        } on Object {
+          try {
+            await _database.write(
+              ReminderRow.toRow(previous.copyWith(isEnabled: false)),
+              sortOrder: null,
+            );
+          } on Object {
+            throw const ReminderSchedulingException(
+              'Could not delete the reminder or restore its alerts. Check this reminder before relying on it.',
+            );
+          }
+          throw const ReminderSchedulingException(
+            'Could not delete the reminder or restore its alerts. It was saved paused; turn it on to retry.',
+          );
+        }
+      }
+      rethrow;
+    }
   }
 }

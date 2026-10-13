@@ -31,12 +31,15 @@ class ReminderLocalDataSource implements ReminderStore {
   static const _fileName = 'reminder_app.db';
   static const _table = 'reminders';
 
-  /// Version 1, one table, no migration runner (add them when a v2 actually
-  /// exists).
-  static Future<ReminderLocalDataSource> open({String? path}) async {
+  /// Interval fields are nullable so existing reminders retain their schedule.
+  static Future<ReminderLocalDataSource> open({
+    String? path,
+    bool singleInstance = true,
+  }) async {
     final db = await openDatabase(
       path ?? '${await getDatabasesPath()}/$_fileName',
-      version: 1,
+      version: 2,
+      singleInstance: singleInstance,
       onCreate: (db, version) async {
         await db.execute('''
           CREATE TABLE $_table (
@@ -47,6 +50,10 @@ class ReminderLocalDataSource implements ReminderStore {
             weekdays TEXT NOT NULL DEFAULT '',
             soundPath TEXT,
             isEnabled INTEGER NOT NULL DEFAULT 1,
+            intervalMinutes INTEGER,
+            quietStartMinute INTEGER,
+            quietEndMinute INTEGER,
+            excludedWeekdays TEXT NOT NULL DEFAULT '',
             sortOrder INTEGER NOT NULL
           )
         ''');
@@ -54,12 +61,26 @@ class ReminderLocalDataSource implements ReminderStore {
           'CREATE INDEX idx_reminders_sort ON $_table (sortOrder)',
         );
       },
+      onUpgrade: (db, oldVersion, newVersion) async {
+        if (oldVersion < 2) {
+          await db.execute(
+            'ALTER TABLE $_table ADD COLUMN intervalMinutes INTEGER',
+          );
+          await db.execute(
+            'ALTER TABLE $_table ADD COLUMN quietStartMinute INTEGER',
+          );
+          await db.execute(
+            'ALTER TABLE $_table ADD COLUMN quietEndMinute INTEGER',
+          );
+          await db.execute(
+            "ALTER TABLE $_table ADD COLUMN excludedWeekdays TEXT NOT NULL DEFAULT ''",
+          );
+        }
+      },
     );
     return ReminderLocalDataSource._(db);
   }
 
-  // ponytail: nothing calls this — the app dies with the process, which closes
-  // the handle. Wire it if a background isolate or a test ever outlives it.
   Future<void> close() => _db.close();
 
   /// All rows in stable list order.
@@ -75,7 +96,7 @@ class ReminderLocalDataSource implements ReminderStore {
   /// trip — a SELECT-then-INSERT was two, and raced with a concurrent write.
   @override
   Future<void> write(Map<String, Object?> row, {int? sortOrder}) async {
-    // 8th value: the sortOrder pin, or the id the COALESCE subquery matches on.
+    // Final value pins sortOrder or selects the existing row's position.
     final args = <Object?>[...row.values, sortOrder ?? row['id']];
     final order = sortOrder == null
         ? 'COALESCE((SELECT sortOrder FROM $_table WHERE id = ?), '

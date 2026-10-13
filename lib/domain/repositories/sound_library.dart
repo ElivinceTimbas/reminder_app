@@ -2,7 +2,7 @@ import '../entities/library_sound.dart';
 
 /// The shared library of formerly used sounds, plus recording.
 ///
-/// The library is a first-class folder in app support: a sound picked from
+/// The library uses app support, or Library/Sounds on iOS: a sound picked from
 /// anywhere is copied in once, re-picking the same sound reuses the entry, and
 /// recordings land in it too, so a take is a reusable library entry rather than
 /// an orphan file in the documents root.
@@ -14,6 +14,12 @@ import '../entities/library_sound.dart';
 abstract class SoundLibrary {
   /// The sounds library, created on demand.
   Future<List<LibrarySound>> listSounds();
+
+  /// Plays a sound until finished or stopped.
+  Future<void> preview(String path);
+
+  /// Stops playback and completes the pending preview operation.
+  Future<void> stopPreview();
 
   /// Whether the microphone may be used. Asked before a recording starts so a
   /// refusal is reported as a refusal rather than as a failed recording.

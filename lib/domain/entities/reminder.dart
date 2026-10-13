@@ -3,7 +3,7 @@ import 'package:equatable/equatable.dart';
 /// A single reminder: a title, a time of day, and an optional set of weekdays.
 ///
 /// [weekdays] holds `DateTime.monday` (1) .. `DateTime.sunday` (7). An EMPTY
-/// set means "remind once" — see [nextOccurrence].
+/// set means "remind once" unless [intervalMinutes] is set.
 ///
 /// Pure domain object, and pure *Dart*: no Flutter, no JSON, no sqflite, no
 /// DateTime fields. The wall-clock time is a plain `hour`/`minute` pair — a
@@ -19,12 +19,40 @@ class Reminder extends Equatable {
     this.weekdays = const {},
     this.soundPath,
     this.isEnabled = true,
+    this.intervalMinutes,
+    this.quietStartMinute,
+    this.quietEndMinute,
+    this.excludedWeekdays = const {},
   }) {
     if (hour < 0 || hour > 23) {
       throw RangeError.range(hour, 0, 23, 'hour');
     }
     if (minute < 0 || minute > 59) {
       throw RangeError.range(minute, 0, 59, 'minute');
+    }
+    if (intervalMinutes != null &&
+        (intervalMinutes! < 15 ||
+            intervalMinutes! > 1440 ||
+            1440 % intervalMinutes! != 0)) {
+      throw ArgumentError('Choose an interval that divides evenly into a day.');
+    }
+    if ((quietStartMinute == null) != (quietEndMinute == null) ||
+        (quietStartMinute != null &&
+            (quietStartMinute! < 0 ||
+                quietStartMinute! >= 1440 ||
+                quietEndMinute! < 0 ||
+                quietEndMinute! >= 1440 ||
+                quietStartMinute == quietEndMinute))) {
+      throw ArgumentError('Quiet hours need different start and end times.');
+    }
+    if (excludedWeekdays.any((day) => day < 1 || day > 7) ||
+        excludedWeekdays.length == 7) {
+      throw ArgumentError('Keep at least one weekday active.');
+    }
+    if (intervalMinutes != null && intervalTimes.isEmpty) {
+      throw ArgumentError(
+        'Quiet hours exclude every alert. Shorten quiet hours or change the start time.',
+      );
     }
   }
 
@@ -35,6 +63,54 @@ class Reminder extends Equatable {
   final Set<int> weekdays;
   final String? soundPath;
   final bool isEnabled;
+  final int? intervalMinutes;
+  final int? quietStartMinute;
+  final int? quietEndMinute;
+  final Set<int> excludedWeekdays;
+
+  bool get isInterval => intervalMinutes != null;
+
+  bool isQuietMinute(int value) {
+    final start = quietStartMinute;
+    final end = quietEndMinute;
+    if (start == null || end == null) return false;
+    return start < end
+        ? value >= start && value < end
+        : value >= start || value < end;
+  }
+
+  /// Daily wall-clock slots; quiet periods skip alerts without shifting cadence.
+  List<int> get intervalTimes {
+    final interval = intervalMinutes;
+    if (interval == null) return const [];
+    return [
+      for (var offset = 0; offset < 1440; offset += interval)
+        if (!isQuietMinute((hour * 60 + minute + offset) % 1440))
+          (hour * 60 + minute + offset) % 1440,
+    ]..sort();
+  }
+
+  DateTime nextIntervalSlot(int minuteOfDay, {int? weekday, DateTime? from}) {
+    final now = from ?? DateTime.now();
+    for (var offset = 0; offset <= 14; offset++) {
+      final date = DateTime(
+        now.year,
+        now.month,
+        now.day + offset,
+        minuteOfDay ~/ 60,
+        minuteOfDay % 60,
+      );
+      // Skip nonexistent local times rather than shifting the recurring slot.
+      if (date.hour == minuteOfDay ~/ 60 &&
+          date.minute == minuteOfDay % 60 &&
+          date.isAfter(now) &&
+          !excludedWeekdays.contains(date.weekday) &&
+          (weekday == null || date.weekday == weekday)) {
+        return date;
+      }
+    }
+    throw StateError('No active interval day.');
+  }
 
   /// The next local `DateTime` this reminder should fire.
   ///
@@ -42,11 +118,17 @@ class Reminder extends Equatable {
   DateTime nextOccurrence({DateTime? from}) {
     final now = from ?? DateTime.now();
 
+    if (isInterval) {
+      return intervalTimes
+          .map((slot) => nextIntervalSlot(slot, from: now))
+          .reduce((a, b) => a.isBefore(b) ? a : b);
+    }
+
     if (weekdays.isEmpty) {
       final todayAt = DateTime(now.year, now.month, now.day, hour, minute);
       return todayAt.isAfter(now)
           ? todayAt
-          : todayAt.add(const Duration(days: 1));
+          : DateTime(now.year, now.month, now.day + 1, hour, minute);
     }
 
     return weekdays
@@ -89,6 +171,12 @@ class Reminder extends Equatable {
     String? soundPath,
     bool clearSoundPath = false,
     bool? isEnabled,
+    int? intervalMinutes,
+    bool clearInterval = false,
+    int? quietStartMinute,
+    int? quietEndMinute,
+    bool clearQuietHours = false,
+    Set<int>? excludedWeekdays,
   }) {
     return Reminder(
       id: id ?? this.id,
@@ -98,6 +186,16 @@ class Reminder extends Equatable {
       weekdays: weekdays ?? this.weekdays,
       soundPath: clearSoundPath ? null : soundPath ?? this.soundPath,
       isEnabled: isEnabled ?? this.isEnabled,
+      intervalMinutes: clearInterval
+          ? null
+          : intervalMinutes ?? this.intervalMinutes,
+      quietStartMinute: clearQuietHours
+          ? null
+          : quietStartMinute ?? this.quietStartMinute,
+      quietEndMinute: clearQuietHours
+          ? null
+          : quietEndMinute ?? this.quietEndMinute,
+      excludedWeekdays: excludedWeekdays ?? this.excludedWeekdays,
     );
   }
 
@@ -110,5 +208,9 @@ class Reminder extends Equatable {
     weekdays,
     soundPath,
     isEnabled,
+    intervalMinutes,
+    quietStartMinute,
+    quietEndMinute,
+    excludedWeekdays,
   ];
 }

@@ -10,10 +10,9 @@ import '../../domain/entities/reminder.dart';
 import '../../domain/entities/sound_resolution.dart';
 import '../../domain/repositories/reminder_scheduler.dart';
 import '../notification_actions.dart';
+import '../ios_notification_sound.dart';
 
-/// Where a custom sound ends up on each platform. Mirrors the native
-/// `getSoundUri` (Android `MainActivity.kt`) and `bundleSoundNamed`
-/// (iOS `AppDelegate.swift`) handlers.
+/// Resolves Android custom sounds through the native FileProvider handler.
 const _soundChannel = MethodChannel('com.deimos.reminder_app/sounds');
 
 /// [ReminderScheduler] on top of `flutter_local_notifications`.
@@ -24,9 +23,12 @@ const _soundChannel = MethodChannel('com.deimos.reminder_app/sounds');
 /// is subject to store review. `SCHEDULE_EXACT_ALARM` is a runtime-granted
 /// permission, which is the right trade for a reminder app.
 ///
-/// Custom sounds: Android plays them for real (see [_details]); iOS plays the
-/// system tone. See [SoundResolution].
-class NotificationReminderScheduler implements ReminderScheduler {
+/// Custom sounds: Android plays them for real (see [_details]); iOS resolves compatible sounds in Library/Sounds or the bundle.
+class NotificationReminderScheduler
+    implements
+        ReminderScheduler,
+        NotificationPermissions,
+        ReminderScheduleValidation {
   final FlutterLocalNotificationsPlugin _plugin =
       FlutterLocalNotificationsPlugin();
 
@@ -86,7 +88,7 @@ class NotificationReminderScheduler implements ReminderScheduler {
       settings: InitializationSettings(
         android: const AndroidInitializationSettings('@mipmap/ic_launcher'),
         iOS: DarwinInitializationSettings(
-          // Permissions are requested explicitly below so the prompt timing is
+          // Permissions are requested from the visible UI so the prompt timing is
           // ours, not a side effect of initialize().
           requestAlertPermission: false,
           requestSoundPermission: false,
@@ -98,33 +100,76 @@ class NotificationReminderScheduler implements ReminderScheduler {
       onDidReceiveBackgroundNotificationResponse:
           onDidReceiveBackgroundNotificationResponse,
     );
-
-    await requestPermissions();
   }
 
-  /// Android 13+ runtime notification permission + exact alarms; iOS alert /
-  /// sound / badge. Safe to call repeatedly.
-  Future<void> requestPermissions() async {
-    await _plugin
+  @override
+  Future<NotificationPermissionStatus> checkPermissions() async {
+    final android = _plugin
         .resolvePlatformSpecificImplementation<
           AndroidFlutterLocalNotificationsPlugin
-        >()
-        ?.requestNotificationsPermission();
-    await _plugin
+        >();
+    if (android != null) {
+      final enabled = await android.areNotificationsEnabled();
+      if (enabled == null) return NotificationPermissionStatus.unknown;
+      if (!enabled) return NotificationPermissionStatus.notificationsDenied;
+      final exact = await android.canScheduleExactNotifications();
+      if (exact == null) return NotificationPermissionStatus.unknown;
+      return exact
+          ? NotificationPermissionStatus.allowed
+          : NotificationPermissionStatus.exactAlarmsDenied;
+    }
+    final ios = _plugin
+        .resolvePlatformSpecificImplementation<
+          IOSFlutterLocalNotificationsPlugin
+        >();
+    if (ios != null) {
+      final options = await ios.checkPermissions();
+      if (options == null) return NotificationPermissionStatus.unknown;
+      return options.isEnabled &&
+              options.isAlertEnabled &&
+              options.isSoundEnabled
+          ? NotificationPermissionStatus.allowed
+          : NotificationPermissionStatus.notificationsDenied;
+    }
+    return NotificationPermissionStatus.unknown;
+  }
+
+  @override
+  Future<NotificationPermissionStatus> requestPermissions() async {
+    final android = _plugin
         .resolvePlatformSpecificImplementation<
           AndroidFlutterLocalNotificationsPlugin
-        >()
-        ?.requestExactAlarmsPermission();
-    await _plugin
-        .resolvePlatformSpecificImplementation<
-          AndroidFlutterLocalNotificationsPlugin
-        >()
-        ?.requestFullScreenIntentPermission();
+        >();
+    if (android != null) {
+      await android.requestNotificationsPermission();
+      if (await android.areNotificationsEnabled() == true) {
+        await android.requestExactAlarmsPermission();
+      }
+    }
     await _plugin
         .resolvePlatformSpecificImplementation<
           IOSFlutterLocalNotificationsPlugin
         >()
         ?.requestPermissions(alert: true, sound: true, badge: true);
+    return checkPermissions();
+  }
+
+  @override
+  Future<void> openNotificationSettings() async {
+    if (await checkPermissions() ==
+        NotificationPermissionStatus.exactAlarmsDenied) {
+      await _plugin
+          .resolvePlatformSpecificImplementation<
+            AndroidFlutterLocalNotificationsPlugin
+          >()
+          ?.requestExactAlarmsPermission();
+      return;
+    }
+    if (await _plugin.openAppNotificationSettings() != true) {
+      throw const ReminderSchedulingException(
+        'Could not open settings. Open notification settings for this app manually.',
+      );
+    }
   }
 
   @override
@@ -137,6 +182,7 @@ class NotificationReminderScheduler implements ReminderScheduler {
 
   @override
   Future<void> schedule(Reminder reminder) async {
+    if (reminder.isEnabled) await validateSchedule(reminder);
     await cancel(reminder.id);
     if (!reminder.isEnabled) return;
 
@@ -144,6 +190,34 @@ class NotificationReminderScheduler implements ReminderScheduler {
     // repeating reminder schedules up to 7 copies that must all agree.
     final details = await _details(reminder);
     final body = _body(reminder, details);
+
+    if (reminder.isInterval) {
+      final days = reminder.excludedWeekdays.isEmpty
+          ? <int?>[null]
+          : <int?>[
+              for (var day = 1; day <= 7; day++)
+                if (!reminder.excludedWeekdays.contains(day)) day,
+            ];
+      for (final slot in reminder.intervalTimes) {
+        for (final day in days) {
+          await _plugin.zonedSchedule(
+            id: notificationIdFor(reminder.id, 8 + slot * 8 + (day ?? 0)),
+            title: reminder.title,
+            body: body,
+            scheduledDate: _toZoned(
+              reminder.nextIntervalSlot(slot, weekday: day),
+            ),
+            notificationDetails: details,
+            androidScheduleMode: AndroidScheduleMode.exactAllowWhileIdle,
+            matchDateTimeComponents: day == null
+                ? DateTimeComponents.time
+                : DateTimeComponents.dayOfWeekAndTime,
+            payload: reminder.id,
+          );
+        }
+      }
+      return;
+    }
 
     if (reminder.weekdays.isEmpty) {
       await _plugin.zonedSchedule(
@@ -176,15 +250,57 @@ class NotificationReminderScheduler implements ReminderScheduler {
     }
   }
 
-  /// Cancels every id this service may have scheduled for [reminderId]: the
-  /// one-shot id plus all 7 weekday ids. Sweeping all 8 — not just the current
-  /// weekday set — is what stops a shrunken set from leaving orphans behind.
-  /// Concurrent: they are independent channel calls.
   @override
-  Future<void> cancel(String reminderId) => Future.wait([
-    for (final weekday in [null, ...List.generate(7, (i) => i + 1)])
-      _plugin.cancel(id: notificationIdFor(reminderId, weekday)),
-  ]);
+  Future<void> validateSchedule(Reminder reminder) async {
+    final count = reminder.isInterval
+        ? reminder.intervalTimes.length *
+              (reminder.excludedWeekdays.isEmpty
+                  ? 1
+                  : 7 - reminder.excludedWeekdays.length)
+        : reminder.weekdays.isEmpty
+        ? 1
+        : reminder.weekdays.length;
+    final pending = await _plugin.pendingNotificationRequests();
+    final others = pending
+        .where((item) => item.payload != reminder.id)
+        .toList();
+    final otherIds = others.map((item) => item.id).toSet();
+    // Keep one slot per recurring reminder for its replaceable Snooze alert.
+    final snoozeReservations = others
+        .map((item) => item.payload)
+        .nonNulls
+        .toSet()
+        .where((id) => !otherIds.contains(notificationIdFor(id)))
+        .length;
+    final ownReservation = reminder.isInterval || reminder.weekdays.isNotEmpty
+        ? 1
+        : 0;
+    final limit = Platform.isIOS ? 64 : 500;
+    final available =
+        (limit - others.length - snoozeReservations - ownReservation).clamp(
+          0,
+          limit,
+        );
+    if (count > available) {
+      throw ReminderSchedulingException(
+        'This schedule needs $count alerts, but only $available are available with room for Snooze. '
+        'Choose a longer interval, longer quiet hours, or fewer active days.',
+      );
+    }
+  }
+
+  /// Includes interval slots and legacy IDs when changing scheduling modes.
+  @override
+  Future<void> cancel(String reminderId) async {
+    final pending = await _plugin.pendingNotificationRequests();
+    final ids = <int>{
+      for (final item in pending)
+        if (item.payload == reminderId) item.id,
+      for (final weekday in [null, ...List.generate(7, (i) => i + 1)])
+        notificationIdFor(reminderId, weekday),
+    };
+    await Future.wait([for (final id in ids) _plugin.cancel(id: id)]);
+  }
 
   tz.TZDateTime _toZoned(DateTime local) => tz.TZDateTime.from(local, tz.local);
 
@@ -194,12 +310,7 @@ class NotificationReminderScheduler implements ReminderScheduler {
     if (reminder.soundPath == null || _hasCustomSound(details)) {
       return 'Reminder';
     }
-    // iOS is the honest case: `UNNotificationSound(named:)` resolves against
-    // the app bundle, which is read-only and code-signed, so a sound copied
-    // into Documents at runtime can never be a notification sound there.
-    return Platform.isIOS
-        ? 'Reminder · custom sound is not bundled on iOS'
-        : 'Reminder · custom sound could not be loaded';
+    return 'Reminder · custom sound could not be loaded';
   }
 
   bool _hasCustomSound(NotificationDetails details) =>
@@ -218,10 +329,8 @@ class NotificationReminderScheduler implements ReminderScheduler {
   /// re-importing a different file under the same name reuses the path, and a
   /// path-hashed id would keep serving the cached sound forever.
   ///
-  /// iOS: `UNNotificationSound(named:)` only resolves inside the app bundle, so
-  /// we ask the app delegate whether a file of that name is bundled. If it is,
-  /// it plays. If it is not, we fall back to the system tone instead of
-  /// inventing a name that would silently not play.
+  /// iOS resolves validated sounds from Library/Sounds or the app bundle.
+  /// Missing or incompatible sounds fall back to the system tone.
   Future<NotificationDetails> _details(Reminder reminder) async {
     final resolved = reminder.soundPath == null
         ? null
@@ -296,25 +405,13 @@ class NotificationReminderScheduler implements ReminderScheduler {
   /// The platform-specific sound name/URI for [path], or null if this platform
   /// cannot play it.
   ///
-  /// Android returns a `content://` FileProvider URI; iOS returns a bundle
-  /// resource name (or null — see [_details]). Both are passed straight to the
+  /// Android returns a `content://` FileProvider URI; iOS returns a validated
+  /// Library/Sounds filename (or null — see [_details]). Both are passed straight to the
   /// plugin, which forwards them to `Uri.parse(sound)` /
   /// `UNNotificationSound soundNamed:`.
   Future<String?> _resolve(String path) async {
     if (!await File(path).exists()) return null;
-    if (Platform.isIOS) {
-      // Never cached: a bundle lookup is a cheap dictionary hit, and the
-      // answer depends on the app build, not on the process.
-      try {
-        return await _soundChannel.invokeMethod<String>(
-          'bundleSoundNamed',
-          _fileName(path),
-        );
-      } on Object {
-        // No AppDelegate handler (unit tests, desktop): nothing is bundled.
-        return null;
-      }
-    }
+    if (Platform.isIOS) return iosNotificationSoundName(path);
     // Only hits are cached, and that is deliberate: a null is not proof the URI
     // stays unobtainable. The FileProvider root is an allowlist, so today it can
     // also be a stale reminder row pointing at a file the user has since deleted
@@ -345,6 +442,4 @@ class NotificationReminderScheduler implements ReminderScheduler {
     }
     return hash.toRadixString(16).padLeft(8, '0');
   }
-
-  String _fileName(String path) => path.split(RegExp(r'[/\\]')).last;
 }

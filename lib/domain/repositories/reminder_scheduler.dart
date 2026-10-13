@@ -21,3 +21,29 @@ abstract class ReminderScheduler {
   /// implying a runtime-imported sound plays everywhere.
   Future<SoundResolution> soundResolution(Reminder reminder);
 }
+
+enum NotificationPermissionStatus {
+  unknown,
+  allowed,
+  notificationsDenied,
+  exactAlarmsDenied,
+}
+
+abstract interface class NotificationPermissions {
+  Future<NotificationPermissionStatus> checkPermissions();
+  Future<NotificationPermissionStatus> requestPermissions();
+  Future<void> openNotificationSettings();
+}
+
+abstract interface class ReminderScheduleValidation {
+  Future<void> validateSchedule(Reminder reminder);
+}
+
+class ReminderSchedulingException implements Exception {
+  const ReminderSchedulingException(this.message);
+
+  final String message;
+
+  @override
+  String toString() => message;
+}

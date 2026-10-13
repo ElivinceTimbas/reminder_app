@@ -36,7 +36,7 @@ class AppDependencies {
        toggleReminder = ToggleReminder(reminders),
        listSounds = ListSounds(sounds),
        pickSound = PickSound(sounds),
-       deleteSound = DeleteSound(sounds),
+       deleteSound = DeleteSound(sounds, reminders),
        startRecording = StartRecording(sounds),
        stopRecording = StopRecording(sounds),
        cancelRecording = CancelRecording(sounds);
@@ -87,6 +87,9 @@ class App extends StatelessWidget {
           addReminder: d.addReminder,
           deleteReminder: d.deleteReminder,
           toggleReminder: d.toggleReminder,
+          permissions: d.scheduler is NotificationPermissions
+              ? d.scheduler as NotificationPermissions
+              : null,
         )..load(),
         child: MaterialApp.router(
           routerConfig: appRouter.config(),

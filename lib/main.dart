@@ -1,4 +1,6 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart';
 
 import 'app/app.dart';
 import 'data/datasources/reminder_local_data_source.dart';
@@ -11,6 +13,12 @@ import 'data/repositories/sqflite_reminder_repository.dart';
 /// exists. Everything below it is wired by type, not by name.
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  LicenseRegistry.addLicense(() async* {
+    yield LicenseEntryWithLineBreaks(
+      ['Sour Gummy'],
+      await rootBundle.loadString('assets/fonts/OFL.txt'),
+    );
+  });
 
   final scheduler = NotificationReminderScheduler();
   await scheduler.init(

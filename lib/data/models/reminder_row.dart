@@ -19,6 +19,10 @@ class ReminderRow {
     'weekdays': (r.weekdays.toList()..sort()).join(','),
     'soundPath': r.soundPath,
     'isEnabled': r.isEnabled ? 1 : 0,
+    'intervalMinutes': r.intervalMinutes,
+    'quietStartMinute': r.quietStartMinute,
+    'quietEndMinute': r.quietEndMinute,
+    'excludedWeekdays': (r.excludedWeekdays.toList()..sort()).join(','),
   };
 
   static Reminder fromRow(Map<String, Object?> row) {
@@ -35,6 +39,14 @@ class ReminderRow {
       weekdays: weekdays,
       soundPath: row['soundPath'] as String?,
       isEnabled: (row['isEnabled'] as int? ?? 1) == 1,
+      intervalMinutes: row['intervalMinutes'] as int?,
+      quietStartMinute: row['quietStartMinute'] as int?,
+      quietEndMinute: row['quietEndMinute'] as int?,
+      excludedWeekdays: (row['excludedWeekdays'] as String? ?? '')
+          .split(',')
+          .where((s) => s.isNotEmpty)
+          .map(int.parse)
+          .toSet(),
     );
   }
 }

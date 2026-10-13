@@ -12,8 +12,6 @@ enum SoundResolution {
   /// A custom sound that this platform will actually play.
   custom,
 
-  /// A sound path is set but this platform cannot play it — iOS resolves
-  /// notification sounds against the read-only, code-signed app bundle only, so
-  /// a file imported at runtime can never become one.
+  /// A sound path is set but the file is missing or unsupported on this device.
   unavailable,
 }

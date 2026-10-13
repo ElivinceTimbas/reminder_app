@@ -1,17 +1,25 @@
+import AVFoundation
 import Flutter
 import UIKit
-// Required by flutter_local_notifications for the background action isolate.
 import flutter_local_notifications
 
 @main
-@objc class AppDelegate: FlutterAppDelegate, FlutterImplicitEngineDelegate {
+@objc class AppDelegate: FlutterAppDelegate, FlutterImplicitEngineDelegate, AVAudioPlayerDelegate {
+  private var previewPlayer: AVAudioPlayer?
+  private var previewResult: FlutterResult?
+  private var previewSessionActive = false
+
   override func application(
     _ application: UIApplication,
     didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?
   ) -> Bool {
-    // Required so notifications are presented while the app is in foreground.
     UNUserNotificationCenter.current().delegate = self as UNUserNotificationCenterDelegate
     return super.application(application, didFinishLaunchingWithOptions: launchOptions)
+  }
+
+  override func applicationDidEnterBackground(_ application: UIApplication) {
+    stopPreview()
+    super.applicationDidEnterBackground(application)
   }
 
   func didInitializeImplicitFlutterEngine(_ engineBridge: FlutterImplicitEngineBridge) {
@@ -20,33 +28,66 @@ import flutter_local_notifications
     }
     GeneratedPluginRegistrant.register(with: engineBridge.pluginRegistry)
 
-    // Resolves a notification sound against the app bundle.
-    //
-    // UNNotificationSound(named:) only ever looks inside the read-only,
-    // code-signed bundle, so a sound imported into Documents at runtime can
-    // NEVER be an iOS notification sound. Dart cannot ask Bundle.main, so the
-    // lookup lives here and returns nil for anything not bundled — the caller
-    // then falls back to the system tone instead of passing a name that would
-    // silently not play.
     let channel = FlutterMethodChannel(
       name: "com.deimos.reminder_app/sounds",
       binaryMessenger: engineBridge.applicationRegistrar.messenger()
     )
-    channel.setMethodCallHandler { call, result in
-      guard call.method == "bundleSoundNamed" else {
-        result(FlutterMethodNotImplemented)
-        return
-      }
-      guard let name = call.arguments as? String, !name.isEmpty else {
+    channel.setMethodCallHandler { [weak self] call, result in
+      guard let self = self else { result(nil); return }
+      switch call.method {
+      case "preview":
+        self.stopPreview()
+        guard let path = call.arguments as? String else {
+          result(FlutterError(code: "bad_args", message: "Expected a sound path", details: nil))
+          return
+        }
+        do {
+          let session = AVAudioSession.sharedInstance()
+          // Release the recorder's active input route before preparing playback.
+          try session.setActive(false, options: .notifyOthersOnDeactivation)
+          try session.setCategory(.playback, mode: .default)
+          try session.setActive(true)
+          self.previewSessionActive = true
+          let player = try AVAudioPlayer(contentsOf: URL(fileURLWithPath: path))
+          player.delegate = self
+          self.previewPlayer = player
+          self.previewResult = result
+          if !player.prepareToPlay() || !player.play() {
+            self.stopPreview(error: FlutterError(code: "playback_failed", message: "This sound could not be played", details: nil))
+          }
+        } catch {
+          self.stopPreview()
+          result(FlutterError(code: "playback_failed", message: error.localizedDescription, details: nil))
+        }
+      case "stopPreview":
+        self.stopPreview()
         result(nil)
-        return
+      default:
+        result(FlutterMethodNotImplemented)
       }
-      let base = (name as NSString).deletingPathExtension
-      let ext = (name as NSString).pathExtension
-      let url = ext.isEmpty
-        ? Bundle.main.url(forResource: base, withExtension: nil)
-        : Bundle.main.url(forResource: base, withExtension: ext)
-      result(url?.lastPathComponent)
     }
+  }
+
+  private func stopPreview(error: FlutterError? = nil) {
+    previewPlayer?.delegate = nil
+    previewPlayer?.stop()
+    previewPlayer = nil
+    let pending = previewResult
+    previewResult = nil
+    pending?(error)
+    if previewSessionActive {
+      try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+      previewSessionActive = false
+    }
+  }
+
+  func audioPlayerDidFinishPlaying(_ player: AVAudioPlayer, successfully flag: Bool) {
+    guard player === previewPlayer else { return }
+    stopPreview(error: flag ? nil : FlutterError(code: "playback_failed", message: "Sound playback failed", details: nil))
+  }
+
+  func audioPlayerDecodeErrorDidOccur(_ player: AVAudioPlayer, error: Error?) {
+    guard player === previewPlayer else { return }
+    stopPreview(error: FlutterError(code: "playback_failed", message: error?.localizedDescription ?? "Unsupported sound", details: nil))
   }
 }

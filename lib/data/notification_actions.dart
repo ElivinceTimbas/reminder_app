@@ -7,8 +7,10 @@ import 'package:timezone/data/latest.dart' as tzdata;
 import 'package:timezone/timezone.dart' as tz;
 
 import 'datasources/reminder_local_data_source.dart';
+import 'ios_notification_sound.dart';
 import 'models/reminder_row.dart';
 import '../domain/entities/reminder.dart';
+import '../domain/repositories/reminder_scheduler.dart';
 import 'repositories/notification_reminder_scheduler.dart';
 
 const _soundChannel = MethodChannel('com.deimos.reminder_app/sounds');
@@ -19,9 +21,19 @@ const actionSnooze = 'action_snooze';
 
 /// Shared logic to handle notification actions. Called from both
 /// foreground and background callbacks.
-Future<void> handleNotificationAction(NotificationResponse response) async {
+Future<void> handleNotificationAction(
+  NotificationResponse response, {
+  Future<ReminderLocalDataSource> Function({bool singleInstance})? openDatabase,
+}) async {
   final actionId = response.actionId;
-  if (actionId == null) return;
+  final reminderId = response.payload;
+  final dismissed =
+      response.notificationResponseType ==
+      NotificationResponseType.notificationDismissed;
+  if (reminderId == null ||
+      (!dismissed && actionId != actionStop && actionId != actionSnooze)) {
+    return;
+  }
 
   // Initialize timezone in this isolate (background isolates need this)
   tzdata.initializeTimeZones();
@@ -32,19 +44,16 @@ Future<void> handleNotificationAction(NotificationResponse response) async {
     // Fallback to UTC if timezone can't be determined
   }
 
-  // Open database in this isolate
-  final database = await ReminderLocalDataSource.open();
+  // Always own this connection, even when invoked on the foreground isolate.
+  final database = await (openDatabase ?? ReminderLocalDataSource.open)(
+    singleInstance: false,
+  );
 
   try {
-    final reminderId = response.payload;
-    if (reminderId == null) return;
-
     // If the notification was dismissed (not tapped with an action), treat it
     // as "Stop" for one-shot reminders: the fired occurrence is done.
-    final dismissed = response.notificationResponseType ==
-        NotificationResponseType.notificationDismissed;
     if (actionId == actionStop || dismissed) {
-      await _handleStop(reminderId, database);
+      await _handleStop(reminderId, database, dismissed: dismissed);
       return;
     } else if (actionId == actionSnooze) {
       await _handleSnooze(reminderId, database);
@@ -65,29 +74,24 @@ Future<void> onDidReceiveBackgroundNotificationResponse(
 
 Future<void> _handleStop(
   String reminderId,
-  ReminderLocalDataSource database,
-) async {
+  ReminderLocalDataSource database, {
+  required bool dismissed,
+}) async {
   // Read all rows, find the one with this id
   final rows = await database.readAll();
   final target = rows.where((r) => r['id'] == reminderId).toList();
   if (target.isEmpty) return;
 
   final reminder = ReminderRow.fromRow(target.first);
+  if (dismissed && (reminder.isInterval || reminder.weekdays.isNotEmpty)) {
+    return;
+  }
   // Stop = disable the reminder. A one-shot reminder becomes a disabled
   // one-shot (never to fire again), a repeating reminder is fully disabled.
   final disabledReminder = reminder.copyWith(isEnabled: false);
   await database.write(ReminderRow.toRow(disabledReminder), sortOrder: null);
 
-  // Cancel all scheduled notifications for this reminder (8 ids sweep)
-  await Future.wait([
-    for (final weekday in [null, ...List.generate(7, (i) => i + 1)])
-      FlutterLocalNotificationsPlugin().cancel(
-        id: NotificationReminderScheduler.notificationIdFor(
-          reminderId,
-          weekday,
-        ),
-      ),
-  ]);
+  await NotificationReminderScheduler().cancel(reminderId);
 }
 
 Future<void> _handleSnooze(
@@ -99,6 +103,8 @@ Future<void> _handleSnooze(
   if (target.isEmpty) return;
 
   final reminder = ReminderRow.fromRow(target.first);
+
+  if (!reminder.isEnabled) return;
 
   // Snooze re-triggers the alarm for today's occurrence only, 5 minutes later.
   //
@@ -115,11 +121,26 @@ Future<void> _handleSnooze(
   ); // null weekday variant
 
   final snoozeTime = snoozeDateFrom(DateTime.now());
+  if (reminder.isInterval &&
+      (reminder.excludedWeekdays.contains(snoozeTime.weekday) ||
+          reminder.isQuietMinute(snoozeTime.hour * 60 + snoozeTime.minute))) {
+    // The next allowed recurring alert is already armed.
+    return;
+  }
   final snoozeZoned = tz.TZDateTime.from(snoozeTime, tz.local);
+
+  final plugin = FlutterLocalNotificationsPlugin();
+  final pending = await plugin.pendingNotificationRequests();
+  if (pending.length >= (Platform.isIOS ? 64 : 500) &&
+      !pending.any((item) => item.id == snoozeId)) {
+    throw const ReminderSchedulingException(
+      'No room to snooze. Existing reminders remain scheduled.',
+    );
+  }
 
   final details = await _buildSnoozeDetails(reminder);
 
-  await FlutterLocalNotificationsPlugin().zonedSchedule(
+  await plugin.zonedSchedule(
     id: snoozeId,
     title: reminder.title,
     body: _snoozeBody(reminder, details),
@@ -202,37 +223,18 @@ String _snoozeBody(Reminder reminder, NotificationDetails details) {
   if (reminder.soundPath == null || _hasCustomSound(details)) {
     return 'Reminder';
   }
-  return Platform.isIOS
-      ? 'Reminder · custom sound is not bundled on iOS'
-      : 'Reminder · custom sound could not be loaded';
+  return 'Reminder · custom sound could not be loaded';
 }
 
 bool _hasCustomSound(NotificationDetails details) =>
     details.android?.sound is AndroidNotificationSound ||
     details.iOS?.sound != null;
 
-/// Resolves [path] to a platform sound, or null to fall back to the default.
-///
-/// ALWAYS null when the app was killed to deliver this action: the sound
-/// channel is registered on the live `MainActivity` (Android,
-/// `configureFlutterEngine`) / `AppDelegate` (iOS), and a background isolate
-/// has no Activity — the plugin spawns a bare engine with only its own
-/// receivers. So `getSoundUri` has no handler, `invokeMethod` throws, and a
-/// snoozed custom sound degrades to the system tone while the soundless case
-/// sounds identical. A snoozed sound is therefore best-effort by construction,
-/// not by accident — see the note on [_handleSnooze].
+/// iOS uses Library/Sounds; Android background actions use the default tone
+/// when the foreground FileProvider channel is unavailable.
 Future<String?> _resolveSound(String path) async {
   if (!await File(path).exists()) return null;
-  if (Platform.isIOS) {
-    try {
-      return await _soundChannel.invokeMethod<String>(
-        'bundleSoundNamed',
-        _fileName(path),
-      );
-    } on Object {
-      return null;
-    }
-  }
+  if (Platform.isIOS) return iosNotificationSoundName(path);
   return await _androidSoundUri(path);
 }
 
@@ -255,5 +257,3 @@ Future<String> _signature(String path) async {
 /// Pure helper to calculate snooze time (exactly 5 minutes from now)
 /// Extracted for unit testing without platform dependencies.
 DateTime snoozeDateFrom(DateTime now) => now.add(const Duration(minutes: 5));
-
-String _fileName(String path) => path.split(RegExp(r'[/\\]')).last;

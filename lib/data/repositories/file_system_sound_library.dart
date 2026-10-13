@@ -2,47 +2,41 @@ import 'dart:io';
 
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:record/record.dart';
 
 import '../../domain/entities/library_sound.dart';
 import '../../domain/repositories/sound_library.dart';
 
-/// The sounds library on disk, plus the `record` and `file_picker` plugins.
-///
-/// The library is a first-class folder (`<support>/sounds`): a sound picked
-/// from anywhere is copied in once, re-picking the same sound reuses the entry,
-/// and the folder is the picker's starting point where the platform supports
-/// one. Recordings land in it too, so a take is a reusable library entry rather
-/// than an orphan file in the documents root.
-///
-/// No playback/preview. If the UI agent needs one, add a `just_audio` (or
-/// `audioplayers`) player rather than blocking on this class.
+/// Shared imported and recorded sounds, including native playback previews.
 class FileSystemSoundLibrary implements SoundLibrary {
   // ponytail: one global recorder — ceiling is a single concurrent recording.
   // Upgrade to per-reminder AudioRecorder instances if that ever matters.
   final AudioRecorder _recorder = AudioRecorder();
 
+  static const _channel = MethodChannel('com.deimos.reminder_app/sounds');
+
   String? _lastRecordingPath;
 
-  /// The sounds library, created on demand.
-  ///
-  /// The application *support* directory, not documents: on Android documents
-  /// is `Context.getDir("flutter")` = `/data/user/0/<pkg>/app_flutter`, which
-  /// only a `<root-path>` FileProvider root can reach, and that root has to
-  /// hardcode `data/user/0/<pkg>` — broken by a secondary-user profile or any
-  /// `applicationIdSuffix`. Support is `filesDir` = `/data/user/0/<pkg>/files`,
-  /// which `<files-path>` maps directly, so the XML stays narrow and
-  /// runtime-derived. Documents buys nothing here: on Android it is app-private
-  /// anyway, and on iOS neither directory is user-visible (this app sets no
-  /// `UIFileSharingEnabled`) and both are included in the device backup.
-  /// (See `res/xml/reminder_file_paths.xml` for the other half of that trade.)
+  /// iOS notification sounds must live in Library/Sounds.
   Future<Directory> get soundsDirectory async {
-    final support = await getApplicationSupportDirectory();
-    final dir = Directory('${support.path}/sounds');
+    final root = Platform.isIOS
+        ? await getLibraryDirectory()
+        : await getApplicationSupportDirectory();
+    final dir = Directory(
+      '${root.path}/${Platform.isIOS ? 'Sounds' : 'sounds'}',
+    );
     if (!await dir.exists()) await dir.create(recursive: true);
     return dir;
   }
+
+  @override
+  Future<void> preview(String path) =>
+      _channel.invokeMethod<void>('preview', path);
+
+  @override
+  Future<void> stopPreview() => _channel.invokeMethod<void>('stopPreview');
 
   @override
   Future<bool> hasPermission() => _recorder.hasPermission();
@@ -57,7 +51,14 @@ class FileSystemSoundLibrary implements SoundLibrary {
   Future<List<LibrarySound>> listSounds() async {
     final dir = await soundsDirectory;
     final sounds = <LibrarySound>[];
-    for (final entry in await dir.list().toList()) {
+    final entries = await dir.list().toList();
+    if (Platform.isIOS) {
+      final legacy = Directory(
+        '${(await getApplicationSupportDirectory()).path}/sounds',
+      );
+      if (await legacy.exists()) entries.addAll(await legacy.list().toList());
+    }
+    for (final entry in entries) {
       if (entry is! File) continue;
       final name = entry.uri.pathSegments.last;
       sounds.add(
@@ -101,8 +102,8 @@ class FileSystemSoundLibrary implements SoundLibrary {
 
   /// Copies [sourcePath] into the library unless the library already holds those
   /// exact bytes. Returns the library path either way — the existing entry if
-  /// it was already there, the fresh copy otherwise. Throws only if
-  /// [sourcePath] does not exist.
+  /// it was already there, the fresh copy otherwise. iOS requires a PCM WAV
+  /// shorter than 30 seconds; invalid imports throw [FormatException].
   ///
   /// Dedupe is by content, never by file name: two different sounds legitimately
   /// share a name like `beep.mp3`. Length is the cheap reject; the byte compare
@@ -115,6 +116,14 @@ class FileSystemSoundLibrary implements SoundLibrary {
       throw FileSystemException('Sound file does not exist', sourcePath);
     }
     final bytes = await source.readAsBytes();
+    if (Platform.isIOS) {
+      if (!sourcePath.toLowerCase().endsWith('.wav')) {
+        throw const FormatException(
+          'On iOS, import a PCM WAV sound shorter than 30 seconds, or record one here.',
+        );
+      }
+      validateNotificationWav(bytes);
+    }
     final dir = await soundsDirectory;
 
     for (final entry in await dir.list().toList()) {
@@ -145,45 +154,66 @@ class FileSystemSoundLibrary implements SoundLibrary {
   /// persisted reminder row, so the traversal guard is not paranoia.
   @override
   Future<void> deleteSound(String path) async {
-    final root = (await soundsDirectory).absolute.path;
+    final roots = [(await soundsDirectory).absolute.path];
+    if (Platform.isIOS) {
+      roots.add('${(await getApplicationSupportDirectory()).path}/sounds');
+    }
     // `normalizePath()` is the load-bearing part: `absolute` alone does not
     // collapse `..`, so `<sounds>/../../outside/x.mp3` keeps the library prefix
     // and sails through a plain `startsWith`. This is the stdlib's path
     // normalizer (no `package:path` dependency) and it also resolves `.`.
     final target = File(path).absolute.uri.normalizePath().toFilePath();
-    if (target != root &&
-        !target.startsWith('$root${Platform.pathSeparator}')) {
+    if (!roots.any(
+      (root) => target.startsWith('$root${Platform.pathSeparator}'),
+    )) {
       throw ArgumentError.value(path, 'path', 'Not inside the sounds library');
     }
     if (await File(target).exists()) await File(target).delete();
   }
 
-  /// Starts recording into the library (`<sounds>/recording_<millis>.m4a`).
-  /// Returns that path, or null if permission was refused.
-  ///
-  /// No content dedupe here, unlike [importSound]: a fresh take is genuinely a
-  /// new sound even when it is silent.
   @override
   Future<String?> startRecording() async {
     if (!await _recorder.hasPermission()) return null;
+    await stopPreview();
     final dir = await soundsDirectory;
+    final extension = Platform.isIOS ? 'wav' : 'm4a';
     final path =
-        '${dir.path}/recording_${DateTime.now().millisecondsSinceEpoch}.m4a';
-    await _recorder.start(const RecordConfig(), path: path);
+        '${dir.path}/recording_${DateTime.now().millisecondsSinceEpoch}.$extension';
     _lastRecordingPath = path;
-    return path;
+    try {
+      await _recorder.start(
+        Platform.isIOS
+            ? const RecordConfig(
+                encoder: AudioEncoder.wav,
+                sampleRate: 44100,
+                numChannels: 1,
+              )
+            : const RecordConfig(),
+        path: path,
+      );
+      return path;
+    } catch (_) {
+      await cancelRecording();
+      rethrow;
+    }
   }
 
-  /// Stops recording. Returns the file path, or null if nothing was captured.
   @override
   Future<String?> stopRecording() async {
     final path = await _recorder.stop();
+    _lastRecordingPath = null;
     if (path == null) return null;
-    _lastRecordingPath = path;
+    if (Platform.isIOS) {
+      try {
+        validateNotificationWav(await File(path).readAsBytes());
+      } catch (_) {
+        await File(path).delete();
+        rethrow;
+      }
+    }
     return path;
   }
 
-  /// Abandons the current take and deletes it.
   @override
   Future<void> cancelRecording() async {
     final path = _lastRecordingPath;
@@ -191,13 +221,70 @@ class FileSystemSoundLibrary implements SoundLibrary {
     await _recorder.cancel();
     if (path != null) {
       final file = File(path);
-      if (file.existsSync()) await file.delete();
+      if (await file.exists()) await file.delete();
     }
   }
 
-  /// Releases the native recorder. Nothing calls it: the app has no teardown
-  /// point (the process dies with the native handle), and the dialog already
-  /// abandons any in-flight take. Kept as the seam for a test or a future
-  /// background-isolate recorder.
-  Future<void> dispose() => _recorder.dispose();
+  Future<void> dispose() async {
+    await stopPreview();
+    await cancelRecording();
+    await _recorder.dispose();
+  }
+}
+
+/// Rejects malformed, compressed, empty, or overlong notification WAV files.
+void validateNotificationWav(Uint8List bytes) {
+  const message =
+      'Use a PCM WAV sound shorter than 30 seconds (8- or 16-bit, mono or stereo).';
+  Never invalid() => throw const FormatException(message);
+  if (bytes.length < 44) invalid();
+  String tag(int start) =>
+      String.fromCharCodes(bytes.sublist(start, start + 4));
+  final data = ByteData.sublistView(bytes);
+  if (tag(0) != 'RIFF' ||
+      tag(8) != 'WAVE' ||
+      data.getUint32(4, Endian.little) + 8 != bytes.length) {
+    invalid();
+  }
+  int? bytesPerSecond;
+  int? blockSize;
+  int? audioSize;
+  var offset = 12;
+  while (offset + 8 <= bytes.length) {
+    final type = tag(offset);
+    final size = data.getUint32(offset + 4, Endian.little);
+    final start = offset + 8;
+    if (start + size > bytes.length) invalid();
+    if (type == 'fmt ') {
+      if (bytesPerSecond != null) invalid();
+      if (size < 16 || data.getUint16(start, Endian.little) != 1) invalid();
+      final channels = data.getUint16(start + 2, Endian.little);
+      final sampleRate = data.getUint32(start + 4, Endian.little);
+      final bits = data.getUint16(start + 14, Endian.little);
+      if ((channels != 1 && channels != 2) ||
+          (bits != 8 && bits != 16) ||
+          sampleRate == 0) {
+        invalid();
+      }
+      blockSize = channels * bits ~/ 8;
+      bytesPerSecond = data.getUint32(start + 8, Endian.little);
+      if (bytesPerSecond != sampleRate * blockSize ||
+          data.getUint16(start + 12, Endian.little) != blockSize) {
+        invalid();
+      }
+    } else if (type == 'data') {
+      if (audioSize != null) invalid();
+      audioSize = size;
+    }
+    offset = start + size + size % 2;
+  }
+  if (offset != bytes.length ||
+      bytesPerSecond == null ||
+      blockSize == null ||
+      audioSize == null ||
+      audioSize == 0 ||
+      audioSize % blockSize != 0 ||
+      audioSize / bytesPerSecond >= 30) {
+    invalid();
+  }
 }

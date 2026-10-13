@@ -44,7 +44,7 @@ Independently review connected code for correctness, async/lifecycle errors, res
 
 Use two-space indentation, `snake_case.dart` filenames, `UpperCamelCase` types, and `lowerCamelCase` members. Follow `flutter_lints` and relative imports within `lib/`. Regenerate `routes.gr.dart`; do not edit it manually.
 
-Use `flutter_test`, descriptive behavior names, and `*_test.dart` files. Add regression coverage for changed behavior; no numeric coverage threshold is configured. Run relevant tests and analysis, then hot reload an active app after Dart/Flutter changes. Report unavailable device checks explicitly.
+Use `flutter_test`, descriptive behavior names, and `*_test.dart` files. No numeric coverage threshold is configured. Run tests, analysis, and validation builds only when the user explicitly requests them. Hot reload an active app after Dart/Flutter changes. Report any checks that were not run.
 
 ## Commits & Pull Requests
 
