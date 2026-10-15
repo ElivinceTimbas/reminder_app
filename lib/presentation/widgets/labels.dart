@@ -24,11 +24,12 @@ String scheduleLabel(Reminder reminder) => reminder.isInterval
     ? 'Every ${intervalLabel(reminder.intervalMinutes!)}'
     : weekdaySummary(reminder.weekdays);
 
-String quietHoursLabel(BuildContext context, Reminder reminder) {
-  final start = reminder.quietStartMinute;
-  final end = reminder.quietEndMinute;
-  if (!reminder.isInterval || start == null || end == null) return '';
-  return 'Quiet ${TimeOfDay(hour: start ~/ 60, minute: start % 60).format(context)}–${TimeOfDay(hour: end ~/ 60, minute: end % 60).format(context)}';
+String activeHoursLabel(BuildContext context, Reminder reminder) {
+  if (!reminder.isInterval) return '';
+  final start = reminder.activeStartMinute;
+  final end = reminder.activeEndMinute;
+  if (start == null || end == null) return 'Active all day';
+  return 'Active ${TimeOfDay(hour: start ~/ 60, minute: start % 60).format(context)}–${TimeOfDay(hour: end ~/ 60, minute: end % 60).format(context)}';
 }
 
 String weekdaySummary(Set<int> weekdays) => weekdays.isEmpty

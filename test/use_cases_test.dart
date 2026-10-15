@@ -115,6 +115,57 @@ class _DeniedScheduler extends _FakeScheduler
 
 void main() {
   test(
+    'startup restores interval schedules without rearming ordinary reminders',
+    () async {
+      final store = _FakeStore();
+      await store.write(ReminderRow.toRow(_reminder(id: 'once')));
+      await store.write(
+        ReminderRow.toRow(_reminder(id: 'weekly').copyWith(weekdays: {1})),
+      );
+      await store.write(
+        ReminderRow.toRow(
+          _reminder(id: 'interval').copyWith(intervalMinutes: 60),
+        ),
+      );
+      final calls = <String>[];
+      final repository = SqfliteReminderRepository(
+        database: store,
+        scheduler: _FakeScheduler(calls),
+      );
+      await repository.restoreIntervalSchedules();
+      expect(calls, ['schedule']);
+      expect((await repository.getAll()).map((r) => r.id), [
+        'once',
+        'weekly',
+        'interval',
+      ]);
+    },
+  );
+
+  test(
+    'startup reports failed interval repairs and keeps paused drafts',
+    () async {
+      final store = _FakeStore();
+      for (final id in ['first', 'second']) {
+        await store.write(
+          ReminderRow.toRow(_reminder(id: id).copyWith(intervalMinutes: 60)),
+        );
+      }
+      final calls = <String>[];
+      final repository = SqfliteReminderRepository(
+        database: store,
+        scheduler: _FakeScheduler(calls)..failSchedule = true,
+      );
+      await expectLater(
+        repository.restoreIntervalSchedules(),
+        throwsA(isA<ReminderSchedulingException>()),
+      );
+      expect(calls, ['schedule', 'cancel', 'schedule', 'cancel']);
+      expect((await repository.getAll()).every((r) => !r.isEnabled), isTrue);
+    },
+  );
+
+  test(
     'failed deletion pauses the row when permissions prevent restoring alerts',
     () async {
       final store = _FakeStore({'r1': 0})..failDelete = true;

@@ -5,6 +5,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 
+import '../../app/theme/app_theme.dart';
 import '../../domain/entities/library_sound.dart';
 import '../../domain/entities/reminder.dart';
 import '../../domain/entities/sound_resolution.dart';
@@ -39,10 +40,10 @@ class _AddReminderDialogState extends State<AddReminderDialog>
   late Set<int> _weekdays;
   bool _useInterval = false;
   int _intervalMinutes = 60;
-  bool _quietHours = false;
-  TimeOfDay _quietStart = const TimeOfDay(hour: 22, minute: 0);
-  TimeOfDay _quietEnd = const TimeOfDay(hour: 7, minute: 0);
-  Set<int> _excludedDays = {};
+  bool _activeHours = false;
+  TimeOfDay _activeStart = const TimeOfDay(hour: 7, minute: 0);
+  TimeOfDay _activeEnd = const TimeOfDay(hour: 22, minute: 0);
+  Set<int> _activeDays = {..._daysOfWeek};
   String? _soundPath;
   Reminder? _draft;
   List<LibrarySound>? _sounds;
@@ -72,16 +73,19 @@ class _AddReminderDialogState extends State<AddReminderDialog>
     _weekdays = {...?existing?.weekdays};
     _useInterval = existing?.isInterval ?? false;
     _intervalMinutes = existing?.intervalMinutes ?? 60;
-    _excludedDays = {...?existing?.excludedWeekdays};
-    _quietHours = existing?.quietStartMinute != null;
-    if (_quietHours) {
-      _quietStart = TimeOfDay(
-        hour: existing!.quietStartMinute! ~/ 60,
-        minute: existing.quietStartMinute! % 60,
+    _activeDays = existing?.isInterval == true
+        ? {...existing!.activeWeekdays}
+        : {..._daysOfWeek};
+    _activeHours =
+        existing?.isInterval == true && existing?.activeStartMinute != null;
+    if (_activeHours) {
+      _activeStart = TimeOfDay(
+        hour: existing!.activeStartMinute! ~/ 60,
+        minute: existing.activeStartMinute! % 60,
       );
-      _quietEnd = TimeOfDay(
-        hour: existing.quietEndMinute! ~/ 60,
-        minute: existing.quietEndMinute! % 60,
+      _activeEnd = TimeOfDay(
+        hour: existing.activeEndMinute! ~/ 60,
+        minute: existing.activeEndMinute! % 60,
       );
     }
     _soundPath = existing?.soundPath;
@@ -160,9 +164,9 @@ class _AddReminderDialogState extends State<AddReminderDialog>
       final draft = _buildDraft();
       final count =
           draft.intervalTimes.length *
-          (_excludedDays.isEmpty ? 1 : 7 - _excludedDays.length);
-      if (defaultTargetPlatform == TargetPlatform.iOS && count > 63) {
-        return 'This schedule needs $count alerts. Choose a longer interval, longer quiet hours, or fewer active days. iOS allows 64 alerts; one is kept for Snooze.';
+          (_activeDays.length == 7 ? 1 : _activeDays.length);
+      if (defaultTargetPlatform == TargetPlatform.iOS && count > 64) {
+        return 'This schedule needs $count alerts. Choose a longer interval, shorter active hours, or fewer active days. iOS allows 64 alerts.';
       }
       return null;
     } on ArgumentError catch (error) {
@@ -178,14 +182,17 @@ class _AddReminderDialogState extends State<AddReminderDialog>
     weekdays: _weekdays,
     soundPath: _soundPath,
     intervalMinutes: includeInterval && _useInterval ? _intervalMinutes : null,
-    quietStartMinute: includeInterval && _useInterval && _quietHours
-        ? _quietStart.hour * 60 + _quietStart.minute
+    quietStartMinute: includeInterval && _useInterval && _activeHours
+        ? _activeEnd.hour * 60 + _activeEnd.minute
         : null,
-    quietEndMinute: includeInterval && _useInterval && _quietHours
-        ? _quietEnd.hour * 60 + _quietEnd.minute
+    quietEndMinute: includeInterval && _useInterval && _activeHours
+        ? _activeStart.hour * 60 + _activeStart.minute
         : null,
     excludedWeekdays: includeInterval && _useInterval
-        ? {..._excludedDays}
+        ? {
+            for (final day in _daysOfWeek)
+              if (!_activeDays.contains(day)) day,
+          }
         : const {},
   );
 
@@ -208,24 +215,24 @@ class _AddReminderDialogState extends State<AddReminderDialog>
     if (picked != null && mounted) setState(() => _time = picked);
   }
 
-  Future<void> _pickQuietTime(bool start) async {
+  Future<void> _pickActiveTime(bool start) async {
     final picked = await showTimePicker(
       context: context,
-      initialTime: start ? _quietStart : _quietEnd,
+      initialTime: start ? _activeStart : _activeEnd,
     );
     if (picked != null && mounted) {
       setState(() {
         if (start) {
-          _quietStart = picked;
+          _activeStart = picked;
         } else {
-          _quietEnd = picked;
+          _activeEnd = picked;
         }
       });
     }
   }
 
   void _toggleDay(int day) => setState(() {
-    final days = _useInterval ? _excludedDays : _weekdays;
+    final days = _useInterval ? _activeDays : _weekdays;
     days.contains(day) ? days.remove(day) : days.add(day);
   });
 
@@ -468,14 +475,19 @@ class _AddReminderDialogState extends State<AddReminderDialog>
       clearSoundPath: _soundPath == null,
       intervalMinutes: _useInterval ? _intervalMinutes : null,
       clearInterval: !_useInterval,
-      quietStartMinute: _quietHours && _useInterval
-          ? _quietStart.hour * 60 + _quietStart.minute
+      quietStartMinute: _activeHours && _useInterval
+          ? _activeEnd.hour * 60 + _activeEnd.minute
           : null,
-      quietEndMinute: _quietHours && _useInterval
-          ? _quietEnd.hour * 60 + _quietEnd.minute
+      quietEndMinute: _activeHours && _useInterval
+          ? _activeStart.hour * 60 + _activeStart.minute
           : null,
-      clearQuietHours: !_quietHours || !_useInterval,
-      excludedWeekdays: _useInterval ? {..._excludedDays} : const {},
+      clearQuietHours: !_activeHours || !_useInterval,
+      excludedWeekdays: _useInterval
+          ? {
+              for (final day in _daysOfWeek)
+                if (!_activeDays.contains(day)) day,
+            }
+          : const {},
     );
     setState(() {
       _saving = true;
@@ -499,6 +511,13 @@ class _AddReminderDialogState extends State<AddReminderDialog>
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
+    final timeButtonStyle = ButtonStyle(
+      minimumSize: const WidgetStatePropertyAll(Size(48, 56)),
+      padding: const WidgetStatePropertyAll(
+        EdgeInsets.symmetric(horizontal: 16),
+      ),
+      textStyle: WidgetStatePropertyAll(theme.textTheme.bodyLarge),
+    );
     final muted = theme.textTheme.bodySmall?.copyWith(
       color: theme.colorScheme.onSurfaceVariant,
     );
@@ -530,115 +549,147 @@ class _AddReminderDialogState extends State<AddReminderDialog>
                   onChanged: (_) => setState(() {}),
                   onSubmitted: (_) => _save(),
                 ),
-                const SizedBox(height: 20),
-                Text(
-                  _useInterval ? 'Daily timing' : 'Time',
-                  style: theme.textTheme.titleSmall,
-                ),
-                const SizedBox(height: 4),
-                OutlinedButton.icon(
-                  style: OutlinedButton.styleFrom(
-                    minimumSize: const Size(48, 48),
-                  ),
-                  onPressed: _saving ? null : _pickTime,
-                  icon: const Icon(Icons.schedule),
-                  label: Text(
-                    MaterialLocalizations.of(context).formatTimeOfDay(_time),
-                  ),
-                ),
-                if (_intervalError == null)
-                  Text(nextDateLabel(context, _prospective), style: muted),
-                const SizedBox(height: 20),
-                Text('Repeat', style: theme.textTheme.titleSmall),
-                SwitchListTile.adaptive(
-                  activeTrackColor: theme.colorScheme.primary,
-                  activeThumbColor: theme.colorScheme.onPrimary,
-                  contentPadding: EdgeInsets.zero,
-                  title: const Text('Repeat at an interval'),
-                  subtitle: const Text(
-                    'Remind me regularly throughout the day',
-                  ),
-                  value: _useInterval,
-                  onChanged: _saving
-                      ? null
-                      : (value) => setState(() => _useInterval = value),
-                ),
-                if (_useInterval) ...[
-                  DropdownButtonFormField<int>(
-                    initialValue: _intervalMinutes,
-                    isExpanded: true,
-                    decoration: const InputDecoration(
-                      labelText: 'Remind me every',
+                const SizedBox(height: 16),
+                Material(
+                  color: theme.colorScheme.primary.withValues(alpha: 0.07),
+                  borderRadius: AppTheme.surfaceRadius,
+                  child: SwitchListTile.adaptive(
+                    shape: const RoundedRectangleBorder(
+                      borderRadius: AppTheme.surfaceRadius,
                     ),
-                    items: [
-                      for (final value in [
-                        15,
-                        20,
-                        30,
-                        45,
-                        60,
-                        90,
-                        120,
-                        180,
-                        240,
-                        360,
-                        480,
-                        720,
-                        1440,
-                      ])
-                        DropdownMenuItem(
-                          value: value,
-                          child: Text(intervalLabel(value)),
-                        ),
-                    ],
-                    onChanged: _saving
-                        ? null
-                        : (value) => setState(() => _intervalMinutes = value!),
-                  ),
-                  const SizedBox(height: 8),
-                  Text(
-                    'Repeats every ${intervalLabel(_intervalMinutes)}, aligned to ${_time.format(context)} each day. Skipped alerts do not change the timing.',
-                    style: muted,
-                  ),
-                  SwitchListTile.adaptive(
                     activeTrackColor: theme.colorScheme.primary,
                     activeThumbColor: theme.colorScheme.onPrimary,
-                    contentPadding: EdgeInsets.zero,
-                    title: const Text('Quiet hours'),
-                    subtitle: const Text(
-                      'Do not send reminders during this time',
+                    contentPadding: const EdgeInsets.symmetric(
+                      horizontal: 16,
+                      vertical: 8,
                     ),
-                    value: _quietHours,
+                    title: const Text('Repeat at an interval'),
+                    subtitle: const Text('Remind me throughout the day'),
+                    value: _useInterval,
                     onChanged: _saving
                         ? null
-                        : (value) => setState(() => _quietHours = value),
+                        : (value) => setState(() => _useInterval = value),
                   ),
-                  if (_quietHours)
-                    Wrap(
-                      spacing: 8,
-                      runSpacing: 8,
-                      children: [
-                        OutlinedButton(
-                          onPressed: _saving
-                              ? null
-                              : () => _pickQuietTime(true),
-                          child: Text('From ${_quietStart.format(context)}'),
-                        ),
-                        OutlinedButton(
-                          onPressed: _saving
-                              ? null
-                              : () => _pickQuietTime(false),
-                          child: Text('Until ${_quietEnd.format(context)}'),
-                        ),
-                      ],
-                    ),
-                  const SizedBox(height: 12),
-                  Text('Skip these days', style: theme.textTheme.titleSmall),
+                ),
+                const SizedBox(height: 20),
+                if (!_useInterval || !_activeHours) ...[
                   Text(
-                    'Selected days will not receive reminders.',
-                    style: muted,
+                    _useInterval ? 'Daily timing' : 'Time',
+                    style: theme.textTheme.titleSmall,
+                  ),
+                  const SizedBox(height: 4),
+                  OutlinedButton.icon(
+                    style: timeButtonStyle,
+                    onPressed: _saving ? null : _pickTime,
+                    icon: const Icon(Icons.schedule),
+                    label: Text(
+                      MaterialLocalizations.of(context).formatTimeOfDay(_time),
+                    ),
                   ),
                 ],
+                if (_intervalError == null)
+                  Text(nextDateLabel(context, _prospective), style: muted),
+                AnimatedSize(
+                  duration: motion,
+                  alignment: Alignment.topCenter,
+                  child: !_useInterval
+                      ? const SizedBox.shrink()
+                      : Column(
+                          crossAxisAlignment: CrossAxisAlignment.stretch,
+                          children: [
+                            const SizedBox(height: 20),
+                            DropdownButtonFormField<int>(
+                              initialValue: _intervalMinutes,
+                              isExpanded: true,
+                              decoration: const InputDecoration(
+                                labelText: 'Remind me every',
+                              ),
+                              items: [
+                                for (final value in [
+                                  15,
+                                  20,
+                                  30,
+                                  45,
+                                  60,
+                                  90,
+                                  120,
+                                  180,
+                                  240,
+                                  360,
+                                  480,
+                                  720,
+                                  1440,
+                                ])
+                                  DropdownMenuItem(
+                                    value: value,
+                                    child: Text(intervalLabel(value)),
+                                  ),
+                              ],
+                              onChanged: _saving
+                                  ? null
+                                  : (value) => setState(
+                                      () => _intervalMinutes = value!,
+                                    ),
+                            ),
+                            const SizedBox(height: 8),
+                            Text(
+                              _activeHours
+                                  ? 'Intervals start at ${_activeStart.format(context)} and stop before ${_activeEnd.format(context)}.'
+                                  : 'Intervals stay aligned to ${_time.format(context)} each day.',
+                              style: muted,
+                            ),
+                            const SizedBox(height: 16),
+                            SwitchListTile.adaptive(
+                              activeTrackColor: theme.colorScheme.primary,
+                              activeThumbColor: theme.colorScheme.onPrimary,
+                              contentPadding: EdgeInsets.zero,
+                              title: const Text('Active hours'),
+                              subtitle: Text(
+                                _activeHours
+                                    ? 'Send reminders only during these hours'
+                                    : 'All day',
+                              ),
+                              value: _activeHours,
+                              onChanged: _saving
+                                  ? null
+                                  : (value) =>
+                                        setState(() => _activeHours = value),
+                            ),
+                            if (_activeHours)
+                              Wrap(
+                                spacing: 8,
+                                runSpacing: 8,
+                                children: [
+                                  OutlinedButton(
+                                    style: timeButtonStyle,
+                                    onPressed: _saving
+                                        ? null
+                                        : () => _pickActiveTime(true),
+                                    child: Text(
+                                      'From ${_activeStart.format(context)}',
+                                    ),
+                                  ),
+                                  OutlinedButton(
+                                    style: timeButtonStyle,
+                                    onPressed: _saving
+                                        ? null
+                                        : () => _pickActiveTime(false),
+                                    child: Text(
+                                      'Until ${_activeEnd.format(context)}',
+                                    ),
+                                  ),
+                                ],
+                              ),
+                          ],
+                        ),
+                ),
+                const Divider(height: 40),
+                Text('Repeat on', style: theme.textTheme.titleSmall),
+                if (_useInterval)
+                  Text(
+                    'Only on selected calendar days.',
+                    style: muted,
+                  ),
                 const SizedBox(height: 4),
                 Wrap(
                   spacing: 6,
@@ -646,10 +697,8 @@ class _AddReminderDialogState extends State<AddReminderDialog>
                   children: [
                     for (final day in _daysOfWeek)
                       Semantics(
-                        label: _useInterval
-                            ? 'Exclude ${weekdayName(day)}'
-                            : weekdayName(day),
-                        selected: (_useInterval ? _excludedDays : _weekdays)
+                        label: weekdayName(day),
+                        selected: (_useInterval ? _activeDays : _weekdays)
                             .contains(day),
                         button: true,
                         excludeSemantics: true,
@@ -662,7 +711,7 @@ class _AddReminderDialogState extends State<AddReminderDialog>
                           child: FilterChip(
                             label: Text(weekdayAbbrev(day)),
                             tooltip: weekdayName(day),
-                            selected: (_useInterval ? _excludedDays : _weekdays)
+                            selected: (_useInterval ? _activeDays : _weekdays)
                                 .contains(day),
                             showCheckmark: false,
                             materialTapTargetSize: MaterialTapTargetSize.padded,
@@ -674,9 +723,11 @@ class _AddReminderDialogState extends State<AddReminderDialog>
                 ),
                 Text(
                   _useInterval
-                      ? (_excludedDays.isEmpty
+                      ? (_activeDays.isEmpty
+                            ? 'Choose at least one day'
+                            : _activeDays.length == 7
                             ? 'Active every day'
-                            : 'No reminders on ${weekdaySummary(_excludedDays)}')
+                            : weekdaySummary(_activeDays))
                       : (_weekdays.isEmpty
                             ? 'Once · choose days to repeat'
                             : weekdaySummary(_weekdays)),
@@ -693,7 +744,7 @@ class _AddReminderDialogState extends State<AddReminderDialog>
                       ),
                     ),
                   ),
-                const SizedBox(height: 12),
+                const Divider(height: 32),
                 ListTile(
                   contentPadding: EdgeInsets.zero,
                   title: const Text('Sound'),
@@ -728,9 +779,6 @@ class _AddReminderDialogState extends State<AddReminderDialog>
                               runSpacing: 4,
                               children: [
                                 OutlinedButton.icon(
-                                  style: OutlinedButton.styleFrom(
-                                    minimumSize: const Size(48, 48),
-                                  ),
                                   onPressed: _soundEnabled
                                       ? _importSound
                                       : null,
@@ -738,9 +786,6 @@ class _AddReminderDialogState extends State<AddReminderDialog>
                                   label: const Text('Import'),
                                 ),
                                 OutlinedButton.icon(
-                                  style: OutlinedButton.styleFrom(
-                                    minimumSize: const Size(48, 48),
-                                  ),
                                   onPressed: _busy || _saving
                                       ? null
                                       : _toggleRecording,
@@ -878,7 +923,8 @@ class _SoundTile extends StatelessWidget {
       color: selected
           ? Theme.of(context).colorScheme.secondaryContainer
           : Theme.of(context).colorScheme.surfaceContainerLow,
-      borderRadius: BorderRadius.circular(12),
+      borderRadius: AppTheme.surfaceRadius,
+      clipBehavior: Clip.antiAlias,
       child: Column(
         children: [
           ListTile(

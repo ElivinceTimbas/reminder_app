@@ -20,15 +20,27 @@ require rebuilding the app; hot reload alone cannot apply them.
 
 ## Alerts and sounds
 
+- Notifications use **Bea's Reminders** as the title and the reminder text below
+  it. Snoozed alerts append “(snoozed)”. **Turn off** pauses the
+  reminder; **Snooze 5 min** is available only for non-interval reminders.
+- The main notification icon uses the launcher bell: Android uses a monochrome
+  version as required for its small icon; iOS uses the bundled launcher artwork.
+  Notification branding changes require rebuilding the installed app. Alerts
+  already scheduled keep their stored text until the reminder is saved again;
+  interval reminders are refreshed automatically when the app starts.
 - Enable **Repeat at an interval** in the reminder editor for intervals from
   15 minutes to 24 hours. The selected time aligns the daily repeating pattern.
-  Quiet hours can cross midnight; selected weekdays are skipped entirely.
-  Skipping alerts preserves the original timing, including while the app is closed.
+  With **Active hours**, the range's start anchors the interval instead (start
+  included, end excluded): 9 AM–5 PM hourly means 9 AM, 10 AM, …, 4 PM.
+  Turn them off for all-day reminders. Select the weekdays that should receive alerts.
+  Overnight ranges are supported; each alert must fall on a selected calendar day.
+  Existing interval schedules are refreshed on startup to apply this timing and
+  remove leftover snoozes; one-time and weekly schedules are left in place.
 - Schedules that exceed device notification capacity are rejected before
-  replacing an existing reminder. Space is reserved for Snooze. On iOS, shorter
-  intervals may require longer quiet hours or fewer active days.
-- Snooze respects quiet hours and excluded weekdays; if five minutes later is
-  blocked, the next regular allowed alert remains scheduled.
+  replacing an existing reminder. Weekly reminders reserve space for Snooze. On iOS, shorter
+  intervals may require shorter active hours or fewer active days.
+- Interval reminders never snooze; dismissing or ignoring an alert leaves only
+  the regular interval schedule armed.
 - Enable notifications from the in-app alert notice. Android also needs exact
   alarm access. The notice links to settings if permission has been denied.
 - Failed scheduling keeps a paused reminder visible for retry. A failed save

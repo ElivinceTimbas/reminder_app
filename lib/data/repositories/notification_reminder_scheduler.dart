@@ -10,6 +10,7 @@ import '../../domain/entities/reminder.dart';
 import '../../domain/entities/sound_resolution.dart';
 import '../../domain/repositories/reminder_scheduler.dart';
 import '../notification_actions.dart';
+import '../notification_content.dart';
 import '../ios_notification_sound.dart';
 
 /// Resolves Android custom sounds through the native FileProvider handler.
@@ -70,15 +71,21 @@ class NotificationReminderScheduler
     // Register iOS notification categories with actions
     final darwinNotificationCategories = <DarwinNotificationCategory>[
       DarwinNotificationCategory(
+        'interval_reminder_actions',
+        actions: [
+          DarwinNotificationAction.plain(actionStop, stopNotificationLabel),
+        ],
+      ),
+      DarwinNotificationCategory(
         'reminder_actions',
         actions: <DarwinNotificationAction>[
           DarwinNotificationAction.plain(
-            'action_stop',
-            'Stop',
+            actionStop,
+            stopNotificationLabel,
           ),
           DarwinNotificationAction.plain(
-            'action_snooze',
-            'Snooze',
+            actionSnooze,
+            snoozeNotificationLabel,
           ),
         ],
       ),
@@ -86,7 +93,7 @@ class NotificationReminderScheduler
 
     await _plugin.initialize(
       settings: InitializationSettings(
-        android: const AndroidInitializationSettings('@mipmap/ic_launcher'),
+        android: const AndroidInitializationSettings(reminderNotificationIcon),
         iOS: DarwinInitializationSettings(
           // Permissions are requested from the visible UI so the prompt timing is
           // ours, not a side effect of initialize().
@@ -192,17 +199,15 @@ class NotificationReminderScheduler
     final body = _body(reminder, details);
 
     if (reminder.isInterval) {
-      final days = reminder.excludedWeekdays.isEmpty
+      final activeDays = reminder.activeWeekdays;
+      final days = activeDays.length == 7
           ? <int?>[null]
-          : <int?>[
-              for (var day = 1; day <= 7; day++)
-                if (!reminder.excludedWeekdays.contains(day)) day,
-            ];
+          : <int?>[...activeDays];
       for (final slot in reminder.intervalTimes) {
         for (final day in days) {
           await _plugin.zonedSchedule(
             id: notificationIdFor(reminder.id, 8 + slot * 8 + (day ?? 0)),
-            title: reminder.title,
+            title: reminderNotificationTitle,
             body: body,
             scheduledDate: _toZoned(
               reminder.nextIntervalSlot(slot, weekday: day),
@@ -222,7 +227,7 @@ class NotificationReminderScheduler
     if (reminder.weekdays.isEmpty) {
       await _plugin.zonedSchedule(
         id: notificationIdFor(reminder.id),
-        title: reminder.title,
+        title: reminderNotificationTitle,
         body: body,
         scheduledDate: _toZoned(reminder.nextOccurrence()),
         notificationDetails: details,
@@ -239,7 +244,7 @@ class NotificationReminderScheduler
       final first = reminder.nextOccurrenceOn(weekday);
       await _plugin.zonedSchedule(
         id: notificationIdFor(reminder.id, weekday),
-        title: reminder.title,
+        title: reminderNotificationTitle,
         body: body,
         scheduledDate: _toZoned(first),
         notificationDetails: details,
@@ -254,9 +259,9 @@ class NotificationReminderScheduler
   Future<void> validateSchedule(Reminder reminder) async {
     final count = reminder.isInterval
         ? reminder.intervalTimes.length *
-              (reminder.excludedWeekdays.isEmpty
+              (reminder.activeWeekdays.length == 7
                   ? 1
-                  : 7 - reminder.excludedWeekdays.length)
+                  : reminder.activeWeekdays.length)
         : reminder.weekdays.isEmpty
         ? 1
         : reminder.weekdays.length;
@@ -265,14 +270,20 @@ class NotificationReminderScheduler
         .where((item) => item.payload != reminder.id)
         .toList();
     final otherIds = others.map((item) => item.id).toSet();
-    // Keep one slot per recurring reminder for its replaceable Snooze alert.
+    // Only weekly reminders need an extra slot for Snooze; intervals cannot snooze.
     final snoozeReservations = others
         .map((item) => item.payload)
         .nonNulls
         .toSet()
-        .where((id) => !otherIds.contains(notificationIdFor(id)))
+        .where(
+          (id) =>
+              !otherIds.contains(notificationIdFor(id)) &&
+              List.generate(7, (day) => day + 1).any(
+                (day) => otherIds.contains(notificationIdFor(id, day)),
+              ),
+        )
         .length;
-    final ownReservation = reminder.isInterval || reminder.weekdays.isNotEmpty
+    final ownReservation = !reminder.isInterval && reminder.weekdays.isNotEmpty
         ? 1
         : 0;
     final limit = Platform.isIOS ? 64 : 500;
@@ -283,8 +294,8 @@ class NotificationReminderScheduler
         );
     if (count > available) {
       throw ReminderSchedulingException(
-        'This schedule needs $count alerts, but only $available are available with room for Snooze. '
-        'Choose a longer interval, longer quiet hours, or fewer active days.',
+        'This schedule needs $count alerts, but only $available are available. '
+        'Choose a longer interval, shorter active hours, or fewer active days.',
       );
     }
   }
@@ -304,18 +315,14 @@ class NotificationReminderScheduler
 
   tz.TZDateTime _toZoned(DateTime local) => tz.TZDateTime.from(local, tz.local);
 
-  String _body(Reminder reminder, NotificationDetails details) {
-    // The title is the message. Only when a sound was asked for and will not
-    // play do we say so, because silence would imply the choice was applied.
-    if (reminder.soundPath == null || _hasCustomSound(details)) {
-      return 'Reminder';
-    }
-    return 'Reminder · custom sound could not be loaded';
-  }
-
-  bool _hasCustomSound(NotificationDetails details) =>
-      details.android?.sound is AndroidNotificationSound ||
-      details.iOS?.sound != null;
+  String _body(Reminder reminder, NotificationDetails details) =>
+      reminderNotificationMessage(
+        reminder.title,
+        customSoundUnavailable:
+            reminder.soundPath != null &&
+            details.android?.sound == null &&
+            details.iOS?.sound == null,
+      );
 
   /// Builds the notification details, resolving [Reminder.soundPath] into
   /// something the OS will really play.
@@ -335,70 +342,13 @@ class NotificationReminderScheduler
     final resolved = reminder.soundPath == null
         ? null
         : await _resolve(reminder.soundPath!);
-    if (resolved == null) {
-      return NotificationDetails(
-        android: const AndroidNotificationDetails(
-          'reminders',
-          'Reminders',
-          channelDescription: 'Scheduled reminder alerts',
-          importance: Importance.max,
-          priority: Priority.high,
-          fullScreenIntent: true,
-          actions: [
-            AndroidNotificationAction(
-              actionStop,
-              'Stop',
-              cancelNotification: true,
-            ),
-            AndroidNotificationAction(
-              actionSnooze,
-              'Snooze',
-              cancelNotification: true,
-            ),
-          ],
-        ),
-        iOS: const DarwinNotificationDetails(
-          categoryIdentifier: 'reminder_actions',
-          interruptionLevel: InterruptionLevel.timeSensitive,
-        ),
-      );
-    }
-
-    // Branch per platform rather than handing the same string to both: on
-    // Android `resolved` is a content:// URI, on iOS a bundle resource name.
-    // Neither platform reads the other's block, but the honest value is cheap.
-    final signature = await _signature(reminder.soundPath!);
-    if (Platform.isIOS) {
-      return NotificationDetails(
-        iOS: DarwinNotificationDetails(
-          sound: resolved,
-          categoryIdentifier: 'reminder_actions',
-          interruptionLevel: InterruptionLevel.timeSensitive,
-        ),
-      );
-    }
-    return NotificationDetails(
-      android: AndroidNotificationDetails(
-        'reminders_$signature',
-        'Reminders',
-        channelDescription: 'Scheduled reminder alerts',
-        importance: Importance.max,
-        priority: Priority.high,
-        fullScreenIntent: true,
-        sound: UriAndroidNotificationSound(resolved),
-        actions: [
-          AndroidNotificationAction(
-            actionStop,
-            'Stop',
-            cancelNotification: true,
-          ),
-          AndroidNotificationAction(
-            actionSnooze,
-            'Snooze',
-            cancelNotification: true,
-          ),
-        ],
-      ),
+    final channelId = resolved != null && !Platform.isIOS
+        ? 'reminders_${await _signature(reminder.soundPath!)}'
+        : 'reminders';
+    return reminderNotificationDetails(
+      reminder,
+      sound: resolved,
+      androidChannelId: channelId,
     );
   }
 

@@ -63,9 +63,10 @@ class AppDependencies {
 }
 
 class App extends StatelessWidget {
-  const App({super.key, required this.dependencies});
+  const App({super.key, required this.dependencies, this.startupError});
 
   final AppDependencies dependencies;
+  final Object? startupError;
 
   @override
   Widget build(BuildContext context) {
@@ -90,8 +91,9 @@ class App extends StatelessWidget {
           permissions: d.scheduler is NotificationPermissions
               ? d.scheduler as NotificationPermissions
               : null,
-        )..load(),
+        )..load(initialError: startupError),
         child: MaterialApp.router(
+          title: "Bea's Reminders",
           routerConfig: appRouter.config(),
           theme: AppTheme.light,
           debugShowCheckedModeBanner: false,

@@ -4,6 +4,7 @@ import 'package:auto_route/auto_route.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 
+import '../../app/theme/app_theme.dart';
 import '../../domain/entities/reminder.dart';
 import '../../domain/repositories/reminder_scheduler.dart';
 import '../bloc/reminder_cubit.dart';
@@ -95,7 +96,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                             crossAxisAlignment: CrossAxisAlignment.start,
                             children: [
                               Text(
-                                "Bea's Reminder App",
+                                "Bea's Reminders",
                                 style: theme.textTheme.headlineMedium,
                               ),
                               const SizedBox(height: 8),
@@ -170,7 +171,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                                     padding: const EdgeInsets.all(24),
                                     decoration: BoxDecoration(
                                       color: theme.colorScheme.errorContainer,
-                                      borderRadius: BorderRadius.circular(20),
+                                      borderRadius: AppTheme.surfaceRadius,
                                     ),
                                     child: Icon(
                                       Icons.delete_outline,
@@ -238,7 +239,7 @@ class _PermissionNoticeState extends State<_PermissionNotice> {
       padding: const EdgeInsets.all(16),
       decoration: BoxDecoration(
         color: Theme.of(context).colorScheme.errorContainer,
-        borderRadius: BorderRadius.circular(16),
+        borderRadius: AppTheme.surfaceRadius,
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -302,7 +303,7 @@ class _ReminderTileState extends State<_ReminderTile> {
     ).formatTimeOfDay(TimeOfDay(hour: reminder.hour, minute: reminder.minute));
     return Material(
       color: theme.colorScheme.surface,
-      borderRadius: BorderRadius.circular(20),
+      borderRadius: AppTheme.surfaceRadius,
       clipBehavior: Clip.antiAlias,
       child: InkWell(
         onTap: () => _openEditor(context, reminder),
@@ -336,15 +337,13 @@ class _ReminderTileState extends State<_ReminderTile> {
               const SizedBox(height: 4),
               Text(
                 reminder.isInterval
-                    ? (reminder.excludedWeekdays.isEmpty
-                          ? 'Every day'
-                          : 'Except ${weekdaySummary(reminder.excludedWeekdays)}')
+                    ? weekdaySummary(reminder.activeWeekdays)
                     : weekdaySummary(reminder.weekdays),
                 style: theme.textTheme.bodyMedium,
               ),
-              if (reminder.isInterval && reminder.quietStartMinute != null)
+              if (reminder.isInterval)
                 Text(
-                  quietHoursLabel(context, reminder),
+                  activeHoursLabel(context, reminder),
                   style: theme.textTheme.bodyMedium,
                 ),
               const SizedBox(height: 4),

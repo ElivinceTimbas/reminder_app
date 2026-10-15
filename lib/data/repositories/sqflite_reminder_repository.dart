@@ -19,6 +19,20 @@ class SqfliteReminderRepository implements ReminderRepository {
   Future<List<Reminder>> getAll() async =>
       (await _database.readAll()).map(ReminderRow.fromRow).toList();
 
+  Future<void> restoreIntervalSchedules() async {
+    Object? firstError;
+    for (final reminder in await getAll()) {
+      if (!reminder.isInterval) continue;
+      try {
+        // Replaces old timing and cancels any leftover interval Snooze alerts.
+        await upsert(reminder);
+      } on Object catch (error) {
+        firstError ??= error;
+      }
+    }
+    if (firstError != null) throw firstError;
+  }
+
   @override
   Future<void> upsert(Reminder reminder, {int? sortOrder}) async {
     if (reminder.isEnabled && _scheduler is NotificationPermissions) {

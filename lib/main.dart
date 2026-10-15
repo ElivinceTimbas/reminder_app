@@ -26,14 +26,22 @@ Future<void> main() async {
   );
 
   final database = await ReminderLocalDataSource.open();
+  final reminders = SqfliteReminderRepository(
+    database: database,
+    scheduler: scheduler,
+  );
+  Object? scheduleError;
+  try {
+    await reminders.restoreIntervalSchedules();
+  } on Object catch (error) {
+    scheduleError = error;
+  }
 
   runApp(
     App(
+      startupError: scheduleError,
       dependencies: AppDependencies(
-        reminders: SqfliteReminderRepository(
-          database: database,
-          scheduler: scheduler,
-        ),
+        reminders: reminders,
         scheduler: scheduler,
         sounds: FileSystemSoundLibrary(),
       ),

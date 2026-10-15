@@ -97,12 +97,18 @@ class ReminderCubit extends Cubit<ReminderState> {
     weekdays: weekdays,
   );
 
-  Future<void> load() async {
+  Future<void> load({Object? initialError}) async {
     emit(state.copyWith(isLoading: true, clearError: true));
     try {
       final reminders = await loadReminders();
       if (!isClosed) {
-        emit(state.copyWith(reminders: reminders, isLoading: false));
+        emit(
+          state.copyWith(
+            reminders: reminders,
+            isLoading: false,
+            error: initialError,
+          ),
+        );
       }
     } on Object catch (e) {
       if (!isClosed) emit(state.copyWith(isLoading: false, error: e));

@@ -9,15 +9,14 @@ import 'package:timezone/timezone.dart' as tz;
 import 'datasources/reminder_local_data_source.dart';
 import 'ios_notification_sound.dart';
 import 'models/reminder_row.dart';
+import 'notification_content.dart';
 import '../domain/entities/reminder.dart';
 import '../domain/repositories/reminder_scheduler.dart';
 import 'repositories/notification_reminder_scheduler.dart';
 
-const _soundChannel = MethodChannel('com.deimos.reminder_app/sounds');
+export 'notification_content.dart' show actionStop, actionSnooze;
 
-/// Action IDs for notification buttons
-const actionStop = 'action_stop';
-const actionSnooze = 'action_snooze';
+const _soundChannel = MethodChannel('com.deimos.reminder_app/sounds');
 
 /// Shared logic to handle notification actions. Called from both
 /// foreground and background callbacks.
@@ -106,6 +105,14 @@ Future<void> _handleSnooze(
 
   if (!reminder.isEnabled) return;
 
+  if (reminder.isInterval) {
+    // Old delivered notifications may still expose the removed Snooze action.
+    await FlutterLocalNotificationsPlugin().cancel(
+      id: NotificationReminderScheduler.notificationIdFor(reminderId),
+    );
+    return;
+  }
+
   // Snooze re-triggers the alarm for today's occurrence only, 5 minutes later.
   //
   // `matchDateTimeComponents` is deliberately absent: that is what makes this a
@@ -121,12 +128,6 @@ Future<void> _handleSnooze(
   ); // null weekday variant
 
   final snoozeTime = snoozeDateFrom(DateTime.now());
-  if (reminder.isInterval &&
-      (reminder.excludedWeekdays.contains(snoozeTime.weekday) ||
-          reminder.isQuietMinute(snoozeTime.hour * 60 + snoozeTime.minute))) {
-    // The next allowed recurring alert is already armed.
-    return;
-  }
   final snoozeZoned = tz.TZDateTime.from(snoozeTime, tz.local);
 
   final plugin = FlutterLocalNotificationsPlugin();
@@ -142,7 +143,7 @@ Future<void> _handleSnooze(
 
   await plugin.zonedSchedule(
     id: snoozeId,
-    title: reminder.title,
+    title: reminderNotificationTitle,
     body: _snoozeBody(reminder, details),
     scheduledDate: snoozeZoned,
     notificationDetails: details,
@@ -155,80 +156,26 @@ Future<NotificationDetails> _buildSnoozeDetails(Reminder reminder) async {
   final resolved = reminder.soundPath == null
       ? null
       : await _resolveSound(reminder.soundPath!);
-  if (resolved == null) {
-    return NotificationDetails(
-      android: const AndroidNotificationDetails(
-        'reminders',
-        'Reminders',
-        channelDescription: 'Scheduled reminder alerts',
-        importance: Importance.max,
-        priority: Priority.high,
-        fullScreenIntent: true,
-        actions: [
-          AndroidNotificationAction(
-            actionStop,
-            'Stop',
-            cancelNotification: true,
-          ),
-          AndroidNotificationAction(
-            actionSnooze,
-            'Snooze',
-            cancelNotification: true,
-          ),
-        ],
-      ),
-      iOS: const DarwinNotificationDetails(
-        categoryIdentifier: 'reminder_actions',
-        interruptionLevel: InterruptionLevel.timeSensitive,
-      ),
-    );
-  }
-
-  final signature = await _signature(reminder.soundPath!);
-  if (Platform.isIOS) {
-    return NotificationDetails(
-      iOS: DarwinNotificationDetails(
-        sound: resolved,
-        categoryIdentifier: 'reminder_actions',
-        interruptionLevel: InterruptionLevel.timeSensitive,
-      ),
-    );
-  }
-  return NotificationDetails(
-    android: AndroidNotificationDetails(
-      'reminders_$signature',
-      'Reminders',
-      channelDescription: 'Scheduled reminder alerts',
-      importance: Importance.max,
-      priority: Priority.high,
-      fullScreenIntent: true,
-      sound: UriAndroidNotificationSound(resolved),
-      actions: [
-        AndroidNotificationAction(
-          actionStop,
-          'Stop',
-          cancelNotification: true,
-        ),
-        AndroidNotificationAction(
-          actionSnooze,
-          'Snooze',
-          cancelNotification: true,
-        ),
-      ],
-    ),
+  final channelId = resolved != null && !Platform.isIOS
+      ? 'reminders_${await _signature(reminder.soundPath!)}'
+      : 'reminders';
+  return reminderNotificationDetails(
+    reminder,
+    sound: resolved,
+    androidChannelId: channelId,
+    snoozed: true,
   );
 }
 
-String _snoozeBody(Reminder reminder, NotificationDetails details) {
-  if (reminder.soundPath == null || _hasCustomSound(details)) {
-    return 'Reminder';
-  }
-  return 'Reminder · custom sound could not be loaded';
-}
-
-bool _hasCustomSound(NotificationDetails details) =>
-    details.android?.sound is AndroidNotificationSound ||
-    details.iOS?.sound != null;
+String _snoozeBody(Reminder reminder, NotificationDetails details) =>
+    reminderNotificationMessage(
+      reminder.title,
+      snoozed: true,
+      customSoundUnavailable:
+          reminder.soundPath != null &&
+          details.android?.sound == null &&
+          details.iOS?.sound == null,
+    );
 
 /// iOS uses Library/Sounds; Android background actions use the default tone
 /// when the foreground FileProvider channel is unavailable.

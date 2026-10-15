@@ -43,16 +43,11 @@ class Reminder extends Equatable {
                 quietEndMinute! < 0 ||
                 quietEndMinute! >= 1440 ||
                 quietStartMinute == quietEndMinute))) {
-      throw ArgumentError('Quiet hours need different start and end times.');
+      throw ArgumentError('Active hours need different start and end times.');
     }
     if (excludedWeekdays.any((day) => day < 1 || day > 7) ||
         excludedWeekdays.length == 7) {
-      throw ArgumentError('Keep at least one weekday active.');
-    }
-    if (intervalMinutes != null && intervalTimes.isEmpty) {
-      throw ArgumentError(
-        'Quiet hours exclude every alert. Shorten quiet hours or change the start time.',
-      );
+      throw ArgumentError('Select at least one reminder day.');
     }
   }
 
@@ -70,6 +65,16 @@ class Reminder extends Equatable {
 
   bool get isInterval => intervalMinutes != null;
 
+  // Keep the existing storage format so saved schedules need no migration.
+  int? get activeStartMinute => quietEndMinute;
+  int? get activeEndMinute => quietStartMinute;
+  Set<int> get activeWeekdays => {
+    for (var day = 1; day <= 7; day++)
+      if (!excludedWeekdays.contains(day)) day,
+  };
+
+  bool isActiveMinute(int value) => !isQuietMinute(value);
+
   bool isQuietMinute(int value) {
     final start = quietStartMinute;
     final end = quietEndMinute;
@@ -79,14 +84,14 @@ class Reminder extends Equatable {
         : value >= start || value < end;
   }
 
-  /// Daily wall-clock slots; quiet periods skip alerts without shifting cadence.
+  /// Daily wall-clock slots within active hours, preserving interval cadence.
   List<int> get intervalTimes {
     final interval = intervalMinutes;
     if (interval == null) return const [];
+    final start = activeStartMinute ?? hour * 60 + minute;
     return [
       for (var offset = 0; offset < 1440; offset += interval)
-        if (!isQuietMinute((hour * 60 + minute + offset) % 1440))
-          (hour * 60 + minute + offset) % 1440,
+        if (isActiveMinute((start + offset) % 1440)) (start + offset) % 1440,
     ]..sort();
   }
 

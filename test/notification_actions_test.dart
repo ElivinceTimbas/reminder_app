@@ -126,6 +126,8 @@ void main() {
           NotificationReminderScheduler.notificationIdFor('r1'),
         );
         expect(args['matchDateTimeComponents'], isNull);
+        expect(args['title'], "Bea's Reminders");
+        expect(args['body'], 'Water (snoozed)');
         final scheduled = DateTime.parse('${args['scheduledDateTime']}Z');
         expect(
           scheduled.difference(DateTime.now().toUtc()).inSeconds,
@@ -153,6 +155,57 @@ void main() {
         expect(calls, isEmpty);
       },
     );
+
+    test('legacy interval Snooze only cancels its old extra alert', () async {
+      final database = _ActionDatabase(
+        Reminder(
+          id: 'r1',
+          title: 'Water',
+          hour: 9,
+          minute: 0,
+          intervalMinutes: 60,
+        ),
+      );
+      await handleNotificationAction(
+        const NotificationResponse(
+          notificationResponseType:
+              NotificationResponseType.selectedNotificationAction,
+          actionId: actionSnooze,
+          payload: 'r1',
+        ),
+        openDatabase: database.open,
+      );
+      expect(database.reminder.isEnabled, isTrue);
+      expect(database.closed, isTrue);
+      expect(calls.map((call) => call.method), ['cancel']);
+      expect(
+        (calls.single.arguments as Map)['id'],
+        NotificationReminderScheduler.notificationIdFor('r1'),
+      );
+    });
+
+    test('dismissing an interval alert does not schedule a snooze', () async {
+      final database = _ActionDatabase(
+        Reminder(
+          id: 'r1',
+          title: 'Water',
+          hour: 9,
+          minute: 0,
+          intervalMinutes: 60,
+        ),
+      );
+      await handleNotificationAction(
+        const NotificationResponse(
+          notificationResponseType:
+              NotificationResponseType.notificationDismissed,
+          payload: 'r1',
+        ),
+        openDatabase: database.open,
+      );
+      expect(database.reminder.isEnabled, isTrue);
+      expect(calls, isEmpty);
+      expect(database.closed, isTrue);
+    });
 
     test('closes action database when native scheduling fails', () async {
       failPlugin = true;
