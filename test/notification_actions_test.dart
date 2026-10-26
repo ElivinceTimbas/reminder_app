@@ -126,6 +126,10 @@ void main() {
           NotificationReminderScheduler.notificationIdFor('r1'),
         );
         expect(args['matchDateTimeComponents'], isNull);
+        expect(
+          (args['platformSpecifics'] as Map)['scheduleMode'],
+          AndroidScheduleMode.alarmClock.name,
+        );
         expect(args['title'], "Bea's Reminders");
         expect(args['body'], 'Water (snoozed)');
         final scheduled = DateTime.parse('${args['scheduledDateTime']}Z');

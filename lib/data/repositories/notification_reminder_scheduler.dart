@@ -18,11 +18,13 @@ const _soundChannel = MethodChannel('com.deimos.reminder_app/sounds');
 
 /// [ReminderScheduler] on top of `flutter_local_notifications`.
 ///
-/// Android exact alarms use [AndroidScheduleMode.exactAllowWhileIdle] plus a
+/// Android exact alarms use [AndroidScheduleMode.alarmClock] plus a
 /// user-granted `SCHEDULE_EXACT_ALARM`. The `USE_EXACT_ALARM` permission is NOT
 /// used: Google Play restricts it to alarm-clock / calendar-class apps, and it
 /// is subject to store review. `SCHEDULE_EXACT_ALARM` is a runtime-granted
 /// permission, which is the right trade for a reminder app.
+/// Alarm-clock mode avoids the per-app throttling of exact-while-idle alarms.
+/// shortcut: the plugin reuses the firing intent for upcoming-alarm UI; upgrade when it separates them.
 ///
 /// Custom sounds: Android plays them for real (see [_details]); iOS resolves compatible sounds in Library/Sounds or the bundle.
 class NotificationReminderScheduler
@@ -213,7 +215,7 @@ class NotificationReminderScheduler
               reminder.nextIntervalSlot(slot, weekday: day),
             ),
             notificationDetails: details,
-            androidScheduleMode: AndroidScheduleMode.exactAllowWhileIdle,
+            androidScheduleMode: AndroidScheduleMode.alarmClock,
             matchDateTimeComponents: day == null
                 ? DateTimeComponents.time
                 : DateTimeComponents.dayOfWeekAndTime,
@@ -231,7 +233,7 @@ class NotificationReminderScheduler
         body: body,
         scheduledDate: _toZoned(reminder.nextOccurrence()),
         notificationDetails: details,
-        androidScheduleMode: AndroidScheduleMode.exactAllowWhileIdle,
+        androidScheduleMode: AndroidScheduleMode.alarmClock,
         payload: reminder.id,
       );
       return;
@@ -248,7 +250,7 @@ class NotificationReminderScheduler
         body: body,
         scheduledDate: _toZoned(first),
         notificationDetails: details,
-        androidScheduleMode: AndroidScheduleMode.exactAllowWhileIdle,
+        androidScheduleMode: AndroidScheduleMode.alarmClock,
         matchDateTimeComponents: DateTimeComponents.dayOfWeekAndTime,
         payload: reminder.id,
       );

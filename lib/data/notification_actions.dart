@@ -147,7 +147,7 @@ Future<void> _handleSnooze(
     body: _snoozeBody(reminder, details),
     scheduledDate: snoozeZoned,
     notificationDetails: details,
-    androidScheduleMode: AndroidScheduleMode.exactAllowWhileIdle,
+    androidScheduleMode: AndroidScheduleMode.alarmClock,
     payload: reminderId,
   );
 }

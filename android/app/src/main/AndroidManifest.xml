@@ -4,7 +4,7 @@
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
     <!-- Exact alarms. USE_EXACT_ALARM is deliberately NOT used: Play restricts
          it to alarm-clock/calendar apps. SCHEDULE_EXACT_ALARM is user-granted
-         and paired with AndroidScheduleMode.exactAllowWhileIdle. -->
+         and paired with AndroidScheduleMode.alarmClock to avoid idle throttling. -->
     <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM"/>
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED"/>
     <uses-permission android:name="android.permission.RECORD_AUDIO"/>
