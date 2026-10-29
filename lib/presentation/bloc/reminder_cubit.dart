@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:equatable/equatable.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:uuid/uuid.dart';
@@ -59,7 +61,14 @@ class ReminderCubit extends Cubit<ReminderState> {
     required this.toggleReminder,
     this.uuid = const Uuid(),
     this.permissions,
-  }) : super(const ReminderState());
+    Stream<void>? scheduleChanges,
+  }) : super(const ReminderState()) {
+    _scheduleChanges = scheduleChanges?.listen(
+      (_) {
+        if (_foreground && !isClosed) unawaited(load());
+      },
+    );
+  }
 
   final LoadReminders loadReminders;
   final AddReminder addReminder;
@@ -67,6 +76,62 @@ class ReminderCubit extends Cubit<ReminderState> {
   final ToggleReminder toggleReminder;
   final Uuid uuid;
   final NotificationPermissions? permissions;
+
+  Timer? _completionTimer;
+  StreamSubscription<void>? _scheduleChanges;
+  bool _foreground = false;
+  bool _refreshingCompletions = false;
+
+  void setForeground(bool foreground) {
+    _foreground = foreground;
+    _updateCompletionTimer(state);
+  }
+
+  @override
+  void onChange(Change<ReminderState> change) {
+    super.onChange(change);
+    _updateCompletionTimer(change.nextState);
+  }
+
+  void _updateCompletionTimer(ReminderState next) {
+    final hasEnabledOnce = next.reminders.any(
+      (reminder) =>
+          reminder.isEnabled &&
+          !reminder.isInterval &&
+          reminder.weekdays.isEmpty,
+    );
+    if (!_foreground || !hasEnabledOnce) {
+      _completionTimer?.cancel();
+      _completionTimer = null;
+    } else {
+      _completionTimer ??= Timer.periodic(
+        const Duration(seconds: 1),
+        (_) => unawaited(refreshCompletions()),
+      );
+    }
+  }
+
+  Future<void> refreshCompletions() async {
+    if (isClosed || !_foreground || _refreshingCompletions || state.isLoading) {
+      return;
+    }
+    _refreshingCompletions = true;
+    try {
+      final reminders = await loadReminders();
+      if (!isClosed && _foreground) emit(state.copyWith(reminders: reminders));
+    } on Object catch (error) {
+      if (!isClosed && _foreground) emit(state.copyWith(error: error));
+    } finally {
+      _refreshingCompletions = false;
+    }
+  }
+
+  @override
+  Future<void> close() async {
+    setForeground(false);
+    await _scheduleChanges?.cancel();
+    await super.close();
+  }
 
   // Undo memory: the sortOrder the last row [delete] removed was stored at, so
   // the undo SnackBar's `add` puts it back where it was instead of at the

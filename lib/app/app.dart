@@ -91,6 +91,9 @@ class App extends StatelessWidget {
           permissions: d.scheduler is NotificationPermissions
               ? d.scheduler as NotificationPermissions
               : null,
+          scheduleChanges: d.scheduler is ReminderScheduleEvents
+              ? (d.scheduler as ReminderScheduleEvents).changes
+              : null,
         )..load(initialError: startupError),
         child: MaterialApp.router(
           title: "Bea's Reminders",

@@ -264,7 +264,10 @@ void main() {
         } else {
           await tester.tap(find.byTooltip('Delete Water plants'));
         }
-        await tester.pumpAndSettle();
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 300));
+        await tester.pump(const Duration(milliseconds: 300));
+        await tester.pump(const Duration(milliseconds: 300));
         expect(repository.rows, isEmpty);
         expect(find.byKey(const ValueKey('one')), findsNothing);
         await tester.tap(find.text('Undo'));
@@ -275,6 +278,113 @@ void main() {
       },
     );
   }
+
+  testWidgets('delete toast counts down across its top edge for four seconds', (
+    tester,
+  ) async {
+    final repository = _MemoryReminders()
+      ..rows.add(_reminder('one', 'Water plants'));
+    await _pumpHome(tester, repository);
+    await tester.tap(find.byTooltip('Delete Water plants'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 300));
+    await tester.pump();
+
+    final toast = find.byType(SnackBar);
+    final progress = find.byType(LinearProgressIndicator);
+    double remaining() => tester.widget<LinearProgressIndicator>(progress).value!;
+    expect(tester.widget<SnackBar>(toast).duration, const Duration(seconds: 4));
+    expect(remaining(), closeTo(1, 0.001));
+    final surface = tester.getRect(
+      find.descendant(of: toast, matching: find.byType(Material)).first,
+    );
+    final bar = tester.getRect(progress);
+    expect(bar.left, closeTo(surface.left, 0.01));
+    expect(bar.right, closeTo(surface.right, 0.01));
+    expect(bar.top, closeTo(surface.top, 0.01));
+
+    await tester.pump(const Duration(seconds: 2));
+    expect(remaining(), closeTo(0.5, 0.01));
+    await tester.pump(const Duration(milliseconds: 1900));
+    expect(remaining(), closeTo(0.025, 0.01));
+    expect(find.text('Undo'), findsOneWidget);
+    await tester.pump(const Duration(milliseconds: 100));
+    await tester.pump(const Duration(milliseconds: 300));
+    expect(toast, findsNothing);
+    expect(progress, findsNothing);
+    expect(repository.rows, isEmpty);
+  });
+
+  testWidgets('a second deletion resets the countdown and Undo restores it', (
+    tester,
+  ) async {
+    final repository = _MemoryReminders()
+      ..rows.addAll([
+        _reminder('one', 'Water plants'),
+        _reminder('two', 'Take vitamins'),
+      ]);
+    await _pumpHome(tester, repository);
+    await tester.tap(find.byTooltip('Delete Water plants'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 300));
+    await tester.pump(const Duration(seconds: 2));
+    expect(
+      tester
+          .widget<LinearProgressIndicator>(find.byType(LinearProgressIndicator))
+          .value,
+      closeTo(0.5, 0.01),
+    );
+
+    await tester.tap(find.byTooltip('Delete Take vitamins'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 300));
+    await tester.pump(const Duration(milliseconds: 300));
+    await tester.pump();
+    expect(find.text('Deleted “Water plants”'), findsNothing);
+    expect(find.text('Deleted “Take vitamins”'), findsOneWidget);
+    expect(
+      tester
+          .widget<LinearProgressIndicator>(find.byType(LinearProgressIndicator))
+          .value,
+      closeTo(1, 0.001),
+    );
+    await tester.tap(find.text('Undo'));
+    await tester.pumpAndSettle();
+    expect(repository.rows.single.id, 'two');
+    expect(find.byType(LinearProgressIndicator), findsNothing);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('reduced motion keeps the full four-second Undo window', (
+    tester,
+  ) async {
+    tester.platformDispatcher.accessibilityFeaturesTestValue =
+        const FakeAccessibilityFeatures(disableAnimations: true);
+    addTearDown(tester.platformDispatcher.clearAccessibilityFeaturesTestValue);
+    final repository = _MemoryReminders()
+      ..rows.add(_reminder('one', 'Water plants'));
+    await _pumpHome(tester, repository);
+    await tester.tap(find.byTooltip('Delete Water plants'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 300));
+    await tester.pump();
+    final progress = find.byType(LinearProgressIndicator);
+    expect(tester.widget<LinearProgressIndicator>(progress).value, 1);
+    await tester.pump(const Duration(milliseconds: 500));
+    expect(tester.widget<LinearProgressIndicator>(progress).value, 1);
+    await tester.pump(const Duration(milliseconds: 1500));
+    expect(
+      tester.widget<LinearProgressIndicator>(progress).value,
+      closeTo(0.5, 0.01),
+    );
+    expect(find.text('Undo'), findsOneWidget);
+    await tester.pump(const Duration(milliseconds: 1900));
+    expect(find.text('Undo'), findsOneWidget);
+    await tester.pump(const Duration(milliseconds: 100));
+    await tester.pump(const Duration(milliseconds: 300));
+    expect(find.byType(SnackBar), findsNothing);
+    expect(tester.takeException(), isNull);
+  });
 
   testWidgets(
     'failed swipe delete keeps the reminder and shows recovery text',

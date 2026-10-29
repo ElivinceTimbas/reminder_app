@@ -39,6 +39,14 @@ abstract interface class ReminderScheduleValidation {
   Future<void> validateSchedule(Reminder reminder);
 }
 
+abstract interface class ReminderScheduleStatus {
+  Future<Set<String>> pendingReminderIds();
+}
+
+abstract interface class ReminderScheduleEvents {
+  Stream<void> get changes;
+}
+
 class ReminderSchedulingException implements Exception {
   const ReminderSchedulingException(this.message);
 

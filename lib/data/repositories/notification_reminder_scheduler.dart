@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/services.dart';
@@ -31,9 +32,15 @@ class NotificationReminderScheduler
     implements
         ReminderScheduler,
         NotificationPermissions,
-        ReminderScheduleValidation {
+        ReminderScheduleValidation,
+        ReminderScheduleStatus,
+        ReminderScheduleEvents {
   final FlutterLocalNotificationsPlugin _plugin =
       FlutterLocalNotificationsPlugin();
+  final _changes = StreamController<void>.broadcast();
+
+  @override
+  Stream<void> get changes => _changes.stream;
 
   /// Resolved FileProvider URI per sound path. A URI is a pure function of the
   /// path (authority + encoded segments), so a path that resolves is asked once
@@ -105,7 +112,13 @@ class NotificationReminderScheduler
           notificationCategories: darwinNotificationCategories,
         ),
       ),
-      onDidReceiveNotificationResponse: onDidReceiveNotificationResponse,
+      onDidReceiveNotificationResponse: (response) async {
+        try {
+          await onDidReceiveNotificationResponse?.call(response);
+        } finally {
+          _changes.add(null);
+        }
+      },
       onDidReceiveBackgroundNotificationResponse:
           onDidReceiveBackgroundNotificationResponse,
     );
@@ -301,6 +314,12 @@ class NotificationReminderScheduler
       );
     }
   }
+
+  @override
+  Future<Set<String>> pendingReminderIds() async => {
+    for (final request in await _plugin.pendingNotificationRequests())
+      if (request.payload != null) request.payload!,
+  };
 
   /// Includes interval slots and legacy IDs when changing scheduling modes.
   @override

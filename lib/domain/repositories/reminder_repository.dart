@@ -8,17 +8,16 @@ import '../entities/reminder.dart';
 /// goes through them, which is what keeps the invariant implemented exactly
 /// once (in `SqfliteReminderRepository`) instead of once per use case.
 abstract class ReminderRepository {
-  /// All reminders in stable list order.
+  /// All reminders in stable list order, reconciling completed Once alerts.
   Future<List<Reminder>> getAll();
 
   /// Inserts or replaces [reminder] and reconciles the OS notification
   /// schedule for it, in that order: write first, then schedule.
   ///
   /// The ordering is about which way the damage lands. A crash between the two
-  /// leaves a row whose notification was never scheduled — permanent, not
-  /// transient: nothing rescans rows at startup (`getAll` is read-only), so that
-  /// reminder stays silent until it is next edited. The other order would leave
-  /// a notification for a row that no longer exists, which the OS can fire on a
+  /// leaves a row whose notification was never scheduled. Later reads mark an
+  /// unscheduled Once reminder completed rather than re-arming it. The other
+  /// order would leave a notification for a row that no longer exists, firing on a
   /// date no user can see or cancel in the app. An unscheduled row is strictly
   /// better than an orphan notification, and never the reverse.
   ///

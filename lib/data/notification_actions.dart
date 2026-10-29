@@ -103,7 +103,11 @@ Future<void> _handleSnooze(
 
   final reminder = ReminderRow.fromRow(target.first);
 
-  if (!reminder.isEnabled) return;
+  final completedOnce =
+      !reminder.isInterval &&
+      reminder.weekdays.isEmpty &&
+      target.first['isCompleted'] == 1;
+  if (!reminder.isEnabled && !completedOnce) return;
 
   if (reminder.isInterval) {
     // Old delivered notifications may still expose the removed Snooze action.
@@ -150,6 +154,26 @@ Future<void> _handleSnooze(
     androidScheduleMode: AndroidScheduleMode.alarmClock,
     payload: reminderId,
   );
+  if (reminder.weekdays.isEmpty) {
+    final bool reactivated;
+    try {
+      reactivated = await database.reactivateOnce(
+        reminderId,
+        target.first['scheduleVersion'] as int? ?? 0,
+      );
+    } on Object {
+      await plugin.cancel(id: snoozeId);
+      rethrow;
+    }
+    if (!reactivated) {
+      final latest = (await database.readAll())
+          .where((row) => row['id'] == reminderId)
+          .firstOrNull;
+      if (latest == null || latest['isEnabled'] != 1) {
+        await plugin.cancel(id: snoozeId);
+      }
+    }
+  }
 }
 
 Future<NotificationDetails> _buildSnoozeDetails(Reminder reminder) async {

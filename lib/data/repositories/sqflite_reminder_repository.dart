@@ -7,17 +7,53 @@ import '../models/reminder_row.dart';
 /// Persists reminders and reconciles their OS notifications.
 /// Failed schedules remain visible as disabled drafts for retry.
 class SqfliteReminderRepository implements ReminderRepository {
-  const SqfliteReminderRepository({
+  SqfliteReminderRepository({
     required this._database,
     required this._scheduler,
   });
 
   final ReminderStore _database;
   final ReminderScheduler _scheduler;
+  Future<void> _pending = Future<void>.value();
+
+  Future<T> _serialize<T>(Future<T> Function() operation) {
+    final result = _pending.then((_) => operation());
+    _pending = result.then<void>((_) {}, onError: (Object _, StackTrace _) {});
+    return result;
+  }
 
   @override
-  Future<List<Reminder>> getAll() async =>
-      (await _database.readAll()).map(ReminderRow.fromRow).toList();
+  Future<List<Reminder>> getAll() => _serialize(_getAll);
+
+  Future<List<Reminder>> _getAll() async {
+    var rows = (await _database.readAll()).toList();
+    if (_scheduler is ReminderScheduleStatus) {
+      final pending = await (_scheduler as ReminderScheduleStatus)
+          .pendingReminderIds();
+      var changedElsewhere = false;
+      for (var index = 0; index < rows.length; index++) {
+        final row = rows[index];
+        final reminder = ReminderRow.fromRow(row);
+        if (!reminder.isEnabled ||
+            reminder.isInterval ||
+            reminder.weekdays.isNotEmpty ||
+            pending.contains(reminder.id)) {
+          continue;
+        }
+        if (await _database.completeOnce(
+          reminder.id,
+          row['scheduleVersion'] as int? ?? 0,
+        )) {
+          // Keep the delivered notification available for Snooze.
+          rows[index] = {...row, 'isEnabled': 0, 'isCompleted': 1};
+        } else {
+          changedElsewhere = true;
+        }
+      }
+      if (changedElsewhere) rows = await _database.readAll();
+    }
+    return rows.map(ReminderRow.fromRow).toList();
+  }
 
   Future<void> restoreIntervalSchedules() async {
     Object? firstError;
@@ -34,7 +70,10 @@ class SqfliteReminderRepository implements ReminderRepository {
   }
 
   @override
-  Future<void> upsert(Reminder reminder, {int? sortOrder}) async {
+  Future<void> upsert(Reminder reminder, {int? sortOrder}) =>
+      _serialize(() => _upsert(reminder, sortOrder: sortOrder));
+
+  Future<void> _upsert(Reminder reminder, {int? sortOrder}) async {
     if (reminder.isEnabled && _scheduler is NotificationPermissions) {
       final status = await (_scheduler as NotificationPermissions)
           .checkPermissions();
@@ -73,8 +112,10 @@ class SqfliteReminderRepository implements ReminderRepository {
   }
 
   @override
-  Future<int?> delete(String id) async {
-    final previous = (await getAll()).where((r) => r.id == id).firstOrNull;
+  Future<int?> delete(String id) => _serialize(() => _delete(id));
+
+  Future<int?> _delete(String id) async {
+    final previous = (await _getAll()).where((r) => r.id == id).firstOrNull;
     // Keep the row when cancellation fails so the user can retry deleting it.
     await _scheduler.cancel(id);
     try {
@@ -82,7 +123,7 @@ class SqfliteReminderRepository implements ReminderRepository {
     } on Object {
       if (previous != null) {
         try {
-          await upsert(previous);
+          await _upsert(previous);
         } on Object {
           try {
             await _database.write(

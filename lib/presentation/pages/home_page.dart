@@ -11,6 +11,8 @@ import '../bloc/reminder_cubit.dart';
 import '../widgets/add_reminder_dialog.dart';
 import '../widgets/labels.dart';
 
+const _deleteToastDuration = Duration(seconds: 4);
+
 @RoutePage()
 class HomePage extends StatefulWidget {
   const HomePage({super.key});
@@ -20,21 +22,27 @@ class HomePage extends StatefulWidget {
 }
 
 class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
+  late final ReminderCubit _cubit;
+
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    _cubit = context.read<ReminderCubit>();
+    _cubit.setForeground(true);
     unawaited(context.read<ReminderCubit>().refreshPermissions());
   }
 
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    _cubit.setForeground(false);
     super.dispose();
   }
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
+    _cubit.setForeground(state == AppLifecycleState.resumed);
     if (state == AppLifecycleState.resumed) {
       final cubit = context.read<ReminderCubit>();
       unawaited(cubit.refreshPermissions());
@@ -46,16 +54,20 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     final cubit = context.read<ReminderCubit>();
     final messenger = ScaffoldMessenger.of(context);
     if (!await cubit.delete(reminder.id) || !mounted) return;
+    final toastKey = GlobalKey<_DeleteToastContentState>();
     messenger
       ..hideCurrentSnackBar()
       ..showSnackBar(
         SnackBar(
-          duration: const Duration(seconds: 4),
+          duration: _deleteToastDuration,
           persist: false,
-          content: Text('Deleted “${reminder.title}”'),
-          action: SnackBarAction(
-            label: 'Undo',
-            onPressed: () => cubit.add(reminder),
+          padding: EdgeInsets.zero,
+          clipBehavior: Clip.hardEdge,
+          onVisible: () => toastKey.currentState?.start(),
+          content: _DeleteToastContent(
+            key: toastKey,
+            title: reminder.title,
+            onUndo: () => cubit.add(reminder),
           ),
         ),
       );
@@ -200,6 +212,80 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           ),
         ),
       ),
+    );
+  }
+}
+
+class _DeleteToastContent extends StatefulWidget {
+  const _DeleteToastContent({
+    super.key,
+    required this.title,
+    required this.onUndo,
+  });
+
+  final String title;
+  final VoidCallback onUndo;
+
+  @override
+  State<_DeleteToastContent> createState() => _DeleteToastContentState();
+}
+
+class _DeleteToastContentState extends State<_DeleteToastContent>
+    with SingleTickerProviderStateMixin {
+  late final _controller = AnimationController(
+    vsync: this,
+    duration: _deleteToastDuration,
+    animationBehavior: AnimationBehavior.preserve,
+  );
+
+  void start() => _controller.forward();
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = Theme.of(context).colorScheme;
+    final reduceMotion = MediaQuery.disableAnimationsOf(context);
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        ExcludeSemantics(
+          child: AnimatedBuilder(
+            animation: _controller,
+            builder: (context, child) {
+              final remaining = 1 - _controller.value;
+              return LinearProgressIndicator(
+                value: reduceMotion
+                    ? (remaining * _deleteToastDuration.inSeconds).ceil() /
+                          _deleteToastDuration.inSeconds
+                    : remaining,
+                minHeight: 3,
+                color: colors.inversePrimary,
+                backgroundColor: colors.onInverseSurface.withValues(alpha: 0.2),
+                borderRadius: BorderRadius.zero,
+              );
+            },
+          ),
+        ),
+        Padding(
+          padding: const EdgeInsets.fromLTRB(24, 4, 12, 4),
+          child: Row(
+            children: [
+              Expanded(child: Text('Deleted “${widget.title}”')),
+              const SizedBox(width: 8),
+              ConstrainedBox(
+                constraints: const BoxConstraints(minWidth: 48, minHeight: 48),
+                child: SnackBarAction(label: 'Undo', onPressed: widget.onUndo),
+              ),
+            ],
+          ),
+        ),
+      ],
     );
   }
 }

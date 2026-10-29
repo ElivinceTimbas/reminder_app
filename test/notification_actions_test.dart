@@ -9,8 +9,14 @@ import 'package:reminder_app/data/repositories/notification_reminder_scheduler.d
 import 'package:reminder_app/domain/entities/reminder.dart';
 
 class _ActionDatabase extends Fake implements ReminderLocalDataSource {
-  _ActionDatabase(this.reminder);
+  _ActionDatabase(this.reminder, {this.isCompleted = false});
   Reminder reminder;
+  bool isCompleted;
+  int scheduleVersion = 1;
+  int writes = 0;
+  int reactivations = 0;
+  bool failReactivate = false;
+  Future<void> Function()? beforeReactivate;
   bool closed = false;
   bool? singleInstance;
 
@@ -21,12 +27,37 @@ class _ActionDatabase extends Fake implements ReminderLocalDataSource {
 
   @override
   Future<List<Map<String, Object?>>> readAll() async => [
-    ReminderRow.toRow(reminder),
+    {
+      ...ReminderRow.toRow(reminder),
+      'isCompleted': isCompleted ? 1 : 0,
+      'scheduleVersion': scheduleVersion,
+    },
   ];
 
   @override
   Future<void> write(Map<String, Object?> row, {int? sortOrder}) async {
     reminder = ReminderRow.fromRow(row);
+    isCompleted = false;
+    scheduleVersion++;
+    writes++;
+  }
+
+  @override
+  Future<bool> reactivateOnce(String id, int expectedVersion) async {
+    reactivations++;
+    if (failReactivate) throw StateError('reactivation failed');
+    await beforeReactivate?.call();
+    if (reminder.id != id ||
+        scheduleVersion != expectedVersion ||
+        reminder.isInterval ||
+        reminder.weekdays.isNotEmpty ||
+        (!reminder.isEnabled && !isCompleted)) {
+      return false;
+    }
+    reminder = reminder.copyWith(isEnabled: true);
+    isCompleted = false;
+    scheduleVersion++;
+    return true;
   }
 
   @override
@@ -41,15 +72,19 @@ void main() {
     const channel = MethodChannel('dexterous.com/flutter/local_notifications');
     final calls = <MethodCall>[];
     var failPlugin = false;
+    String? failMethod;
     setUp(() {
       debugDefaultTargetPlatformOverride = TargetPlatform.android;
       AndroidFlutterLocalNotificationsPlugin.registerWith();
       calls.clear();
       failPlugin = false;
+      failMethod = null;
       TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
           .setMockMethodCallHandler(channel, (call) async {
             calls.add(call);
-            if (failPlugin) throw PlatformException(code: 'failed');
+            if (failPlugin || call.method == failMethod) {
+              throw PlatformException(code: 'failed');
+            }
             return call.method == 'pendingNotificationRequests' ? [] : null;
           });
     });
@@ -115,6 +150,7 @@ void main() {
         );
         expect(database.reminder.isEnabled, isTrue);
         expect(database.reminder.weekdays, {1, 3});
+        expect(database.writes, 0);
         expect(database.closed, isTrue);
         final args =
             calls
@@ -139,6 +175,199 @@ void main() {
         );
       },
     );
+
+    test('Snooze re-enables an automatically completed one-off', () async {
+      final database = _ActionDatabase(
+        Reminder(
+          id: 'r1',
+          title: 'Water',
+          hour: 9,
+          minute: 0,
+          isEnabled: false,
+        ),
+        isCompleted: true,
+      );
+      await handleNotificationAction(
+        const NotificationResponse(
+          notificationResponseType:
+              NotificationResponseType.selectedNotificationAction,
+          actionId: actionSnooze,
+          payload: 'r1',
+        ),
+        openDatabase: database.open,
+      );
+
+      expect(
+        calls.where((call) => call.method == 'zonedSchedule'),
+        hasLength(1),
+      );
+      expect(database.reminder.isEnabled, isTrue);
+      expect(database.isCompleted, isFalse);
+      expect(database.scheduleVersion, 2);
+      expect(database.writes, 0);
+      expect(database.reactivations, 1);
+      expect(database.closed, isTrue);
+    });
+
+    test('Snooze does not re-enable a manually paused one-off', () async {
+      final database = _ActionDatabase(
+        Reminder(
+          id: 'r1',
+          title: 'Water',
+          hour: 9,
+          minute: 0,
+          isEnabled: false,
+        ),
+      );
+      await handleNotificationAction(
+        const NotificationResponse(
+          notificationResponseType:
+              NotificationResponseType.selectedNotificationAction,
+          actionId: actionSnooze,
+          payload: 'r1',
+        ),
+        openDatabase: database.open,
+      );
+
+      expect(calls, isEmpty);
+      expect(database.reminder.isEnabled, isFalse);
+      expect(database.isCompleted, isFalse);
+      expect(database.writes, 0);
+      expect(database.reactivations, 0);
+      expect(database.closed, isTrue);
+    });
+
+    test(
+      'failed Snooze leaves an automatically completed one-off disabled',
+      () async {
+        failMethod = 'zonedSchedule';
+        final database = _ActionDatabase(
+          Reminder(
+            id: 'r1',
+            title: 'Water',
+            hour: 9,
+            minute: 0,
+            isEnabled: false,
+          ),
+          isCompleted: true,
+        );
+        await expectLater(
+          handleNotificationAction(
+            const NotificationResponse(
+              notificationResponseType:
+                  NotificationResponseType.selectedNotificationAction,
+              actionId: actionSnooze,
+              payload: 'r1',
+            ),
+            openDatabase: database.open,
+          ),
+          throwsA(isA<PlatformException>()),
+        );
+
+        expect(database.reminder.isEnabled, isFalse);
+        expect(database.isCompleted, isTrue);
+        expect(database.scheduleVersion, 1);
+        expect(database.writes, 0);
+        expect(database.reactivations, 0);
+        expect(database.closed, isTrue);
+      },
+    );
+
+    test(
+      'failed Snooze reactivation cancels its newly scheduled alert',
+      () async {
+        final database = _ActionDatabase(
+          Reminder(
+            id: 'r1',
+            title: 'Water',
+            hour: 9,
+            minute: 0,
+            isEnabled: false,
+          ),
+          isCompleted: true,
+        )..failReactivate = true;
+        await expectLater(
+          handleNotificationAction(
+            const NotificationResponse(
+              notificationResponseType:
+                  NotificationResponseType.selectedNotificationAction,
+              actionId: actionSnooze,
+              payload: 'r1',
+            ),
+            openDatabase: database.open,
+          ),
+          throwsStateError,
+        );
+
+        expect(calls.map((call) => call.method), [
+          'pendingNotificationRequests',
+          'zonedSchedule',
+          'cancel',
+        ]);
+        expect(
+          (calls.last.arguments as Map)['id'],
+          NotificationReminderScheduler.notificationIdFor('r1'),
+        );
+        expect(database.reminder.isEnabled, isFalse);
+        expect(database.isCompleted, isTrue);
+        expect(database.scheduleVersion, 1);
+        expect(database.reactivations, 1);
+        expect(database.writes, 0);
+        expect(database.closed, isTrue);
+      },
+    );
+
+    for (final enabled in [false, true]) {
+      test(
+        'Snooze preserves the newer ${enabled ? 'enabled' : 'paused'} one-off row',
+        () async {
+          final database = _ActionDatabase(
+            Reminder(
+              id: 'r1',
+              title: 'Water',
+              hour: 9,
+              minute: 0,
+              isEnabled: false,
+            ),
+            isCompleted: true,
+          );
+          database.beforeReactivate = () => database.write(
+            ReminderRow.toRow(
+              database.reminder.copyWith(
+                title: 'Changed while snoozing',
+                hour: 12,
+                isEnabled: enabled,
+              ),
+            ),
+          );
+          await handleNotificationAction(
+            const NotificationResponse(
+              notificationResponseType:
+                  NotificationResponseType.selectedNotificationAction,
+              actionId: actionSnooze,
+              payload: 'r1',
+            ),
+            openDatabase: database.open,
+          );
+
+          expect(database.reminder.title, 'Changed while snoozing');
+          expect(database.reminder.hour, 12);
+          expect(database.reminder.isEnabled, enabled);
+          expect(database.scheduleVersion, 2);
+          expect(database.isCompleted, isFalse);
+          expect(database.reactivations, 1);
+          final cancellations = calls.where((call) => call.method == 'cancel');
+          expect(cancellations, hasLength(enabled ? 0 : 1));
+          if (!enabled) {
+            expect(
+              (cancellations.single.arguments as Map)['id'],
+              NotificationReminderScheduler.notificationIdFor('r1'),
+            );
+          }
+          expect(database.closed, isTrue);
+        },
+      );
+    }
 
     test(
       'dismissal preserves repeating reminders even without an action id',

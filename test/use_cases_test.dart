@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter_test/flutter_test.dart';
 import 'package:reminder_app/data/datasources/reminder_local_data_source.dart';
 import 'package:reminder_app/data/models/reminder_row.dart';
@@ -23,7 +25,11 @@ class _FakeStore implements ReminderStore {
   _FakeStore([Map<String, int>? seeded, List<String>? callLog])
     : calls = callLog ?? [] {
     for (final entry in (seeded ?? const <String, int>{}).entries) {
-      rows.add(ReminderRow.toRow(_reminder(id: entry.key, title: entry.key)));
+      rows.add({
+        ...ReminderRow.toRow(_reminder(id: entry.key, title: entry.key)),
+        'scheduleVersion': 1,
+        'isCompleted': 0,
+      });
       _orders[entry.key] = entry.value;
     }
   }
@@ -36,11 +42,13 @@ class _FakeStore implements ReminderStore {
   /// Flipped by the failure test; there is no sqflite to make fail for real.
   bool failWrites = false;
   bool failDelete = false;
+  bool failCompletion = false;
 
   @override
   Future<List<Map<String, Object?>>> readAll() async {
     calls.add('readAll');
-    return [...rows]..sort((a, b) => _order(a).compareTo(_order(b)));
+    return [for (final row in rows) Map<String, Object?>.of(row)]
+      ..sort((a, b) => _order(a).compareTo(_order(b)));
   }
 
   int _order(Map<String, Object?> row) => _orders[row['id']! as String]!;
@@ -50,9 +58,11 @@ class _FakeStore implements ReminderStore {
     calls.add('write');
     if (failWrites) throw StateError('disk full');
     final id = row['id']! as String;
+    final previous = rows.where((r) => r['id'] == id).firstOrNull;
+    final version = (previous?['scheduleVersion'] as int? ?? 0) + 1;
     rows
       ..removeWhere((r) => r['id'] == id)
-      ..add(row);
+      ..add({...row, 'scheduleVersion': version, 'isCompleted': 0});
     // The one INSERT's COALESCE, in Dart: the pin, else the row's current
     // order, else the end of the list.
     _orders[id] =
@@ -60,6 +70,44 @@ class _FakeStore implements ReminderStore {
         _orders[id] ??
         _orders.values.fold(-1, (a, b) => a > b ? a : b) + 1;
     orders.add(sortOrder);
+  }
+
+  @override
+  Future<bool> completeOnce(String id, int scheduleVersion) async {
+    calls.add('completeOnce');
+    if (failCompletion) throw StateError('completion failed');
+    final index = rows.indexWhere((row) => row['id'] == id);
+    if (index < 0) return false;
+    final row = rows[index];
+    if (row['scheduleVersion'] != scheduleVersion ||
+        row['isEnabled'] != 1 ||
+        row['intervalMinutes'] != null ||
+        row['weekdays'] != '') {
+      return false;
+    }
+    rows[index] = {...row, 'isEnabled': 0, 'isCompleted': 1};
+    return true;
+  }
+
+  @override
+  Future<bool> reactivateOnce(String id, int scheduleVersion) async {
+    calls.add('reactivateOnce');
+    final index = rows.indexWhere((row) => row['id'] == id);
+    if (index < 0) return false;
+    final row = rows[index];
+    if (row['scheduleVersion'] != scheduleVersion ||
+        row['intervalMinutes'] != null ||
+        row['weekdays'] != '' ||
+        (row['isEnabled'] != 1 && row['isCompleted'] != 1)) {
+      return false;
+    }
+    rows[index] = {
+      ...row,
+      'isEnabled': 1,
+      'isCompleted': 0,
+      'scheduleVersion': scheduleVersion + 1,
+    };
+    return true;
   }
 
   @override
@@ -113,7 +161,285 @@ class _DeniedScheduler extends _FakeScheduler
   Future<void> openNotificationSettings() async {}
 }
 
+class _PendingScheduler extends _FakeScheduler
+    implements ReminderScheduleStatus {
+  _PendingScheduler(super.calls);
+
+  final pending = <String>{};
+  Future<Set<String>> Function()? onPending;
+  Future<void> Function(Reminder)? onSchedule;
+
+  @override
+  Future<Set<String>> pendingReminderIds() async {
+    calls.add('pending');
+    return onPending == null ? Set.of(pending) : await onPending!();
+  }
+
+  @override
+  Future<void> schedule(Reminder reminder) async {
+    await super.schedule(reminder);
+    await onSchedule?.call(reminder);
+    if (reminder.isEnabled) {
+      pending.add(reminder.id);
+    } else {
+      pending.remove(reminder.id);
+    }
+  }
+}
+
 void main() {
+  group('one-off completion follows the native pending schedule', () {
+    test('a pending one-off stays enabled', () async {
+      final calls = <String>[];
+      final store = _FakeStore({'r1': 0}, calls);
+      final scheduler = _PendingScheduler(calls)..pending.add('r1');
+      final repository = SqfliteReminderRepository(
+        database: store,
+        scheduler: scheduler,
+      );
+
+      expect((await repository.getAll()).single.isEnabled, isTrue);
+      expect(store.rows.single['isCompleted'], 0);
+      expect(calls, ['readAll', 'pending']);
+    });
+
+    test(
+      'a fired one-off is persisted disabled without cancelling its alert',
+      () async {
+        final calls = <String>[];
+        final store = _FakeStore({'r1': 0}, calls);
+        final repository = SqfliteReminderRepository(
+          database: store,
+          scheduler: _PendingScheduler(calls),
+        );
+
+        expect((await repository.getAll()).single.isEnabled, isFalse);
+        expect(store.rows.single['isEnabled'], 0);
+        expect(store.rows.single['isCompleted'], 1);
+        expect(calls, ['readAll', 'pending', 'completeOnce']);
+        expect((await repository.getAll()).single.isEnabled, isFalse);
+        expect(calls.where((call) => call == 'completeOnce'), hasLength(1));
+      },
+    );
+
+    test(
+      'weekly, interval and manually paused reminders remain unchanged',
+      () async {
+        final calls = <String>[];
+        final store = _FakeStore(null, calls);
+        for (final reminder in [
+          _reminder(id: 'weekly').copyWith(weekdays: {1}),
+          _reminder(id: 'interval').copyWith(intervalMinutes: 60),
+          _reminder(id: 'paused').copyWith(isEnabled: false),
+        ]) {
+          await store.write(ReminderRow.toRow(reminder));
+        }
+        calls.clear();
+        final repository = SqfliteReminderRepository(
+          database: store,
+          scheduler: _PendingScheduler(calls),
+        );
+
+        final loaded = await repository.getAll();
+        expect(loaded.map((r) => r.isEnabled), [true, true, false]);
+        expect(store.rows.every((row) => row['isCompleted'] == 0), isTrue);
+        expect(calls, ['readAll', 'pending']);
+      },
+    );
+
+    test(
+      'completion failure is surfaced without reporting a paused row',
+      () async {
+        final calls = <String>[];
+        final store = _FakeStore({'r1': 0}, calls)..failCompletion = true;
+        final repository = SqfliteReminderRepository(
+          database: store,
+          scheduler: _PendingScheduler(calls),
+        );
+
+        await expectLater(repository.getAll(), throwsStateError);
+        expect(store.rows.single['isEnabled'], 1);
+        expect(store.rows.single['isCompleted'], 0);
+        expect(calls, ['readAll', 'pending', 'completeOnce']);
+        store.failCompletion = false;
+        expect((await repository.getAll()).single.isEnabled, isFalse);
+      },
+    );
+
+    test('a stale completion cannot disable a newly saved schedule', () async {
+      final calls = <String>[];
+      final store = _FakeStore({'r1': 0}, calls);
+      final scheduler = _PendingScheduler(calls)
+        ..onPending = () async {
+          await store.write(ReminderRow.toRow(_reminder(title: 'Rescheduled')));
+          return <String>{};
+        };
+      final repository = SqfliteReminderRepository(
+        database: store,
+        scheduler: scheduler,
+      );
+
+      final reminder = (await repository.getAll()).single;
+      expect(reminder.title, 'Rescheduled');
+      expect(reminder.isEnabled, isTrue);
+      expect(store.rows.single['scheduleVersion'], 2);
+      expect(store.rows.single['isCompleted'], 0);
+      expect(calls, ['readAll', 'pending', 'write', 'completeOnce', 'readAll']);
+    });
+
+    test(
+      'loading waits for a saved one-off to finish native scheduling',
+      () async {
+        final calls = <String>[];
+        final store = _FakeStore(null, calls);
+        final started = Completer<void>();
+        final release = Completer<void>();
+        final scheduler = _PendingScheduler(calls)
+          ..onSchedule = (_) async {
+            started.complete();
+            await release.future;
+          };
+        final repository = SqfliteReminderRepository(
+          database: store,
+          scheduler: scheduler,
+        );
+
+        final saving = repository.upsert(_reminder());
+        await started.future;
+        final loading = repository.getAll();
+        await Future<void>.delayed(Duration.zero);
+        expect(calls, ['write', 'schedule']);
+        release.complete();
+        await saving;
+        expect((await loading).single.isEnabled, isTrue);
+        expect(calls, ['write', 'schedule', 'readAll', 'pending']);
+        expect(store.rows.single['isCompleted'], 0);
+      },
+    );
+  });
+
+  group('foreground one-off completion refresh', () {
+    ({
+      ReminderCubit cubit,
+      _FakeStore store,
+      _PendingScheduler scheduler,
+      List<String> calls,
+    })
+    build({
+      Stream<void>? scheduleChanges,
+    }) {
+      final calls = <String>[];
+      final store = _FakeStore({'r1': 0}, calls);
+      final scheduler = _PendingScheduler(calls)..pending.add('r1');
+      final repository = SqfliteReminderRepository(
+        database: store,
+        scheduler: scheduler,
+      );
+      final cubit = ReminderCubit(
+        loadReminders: LoadReminders(repository),
+        addReminder: AddReminder(repository),
+        deleteReminder: DeleteReminder(repository),
+        toggleReminder: ToggleReminder(repository),
+        scheduleChanges: scheduleChanges,
+      );
+      addTearDown(() async {
+        if (!cubit.isClosed) await cubit.close();
+      });
+      return (cubit: cubit, store: store, scheduler: scheduler, calls: calls);
+    }
+
+    testWidgets('an inactive cubit does not poll native schedules', (
+      tester,
+    ) async {
+      final h = build();
+      await h.cubit.load();
+      h.scheduler.pending.clear();
+      h.calls.clear();
+
+      await tester.pump(const Duration(seconds: 2));
+      expect(h.calls, isEmpty);
+      expect(h.cubit.state.reminders.single.isEnabled, isTrue);
+    });
+
+    testWidgets('foreground completes a fired one-off after one second', (
+      tester,
+    ) async {
+      final h = build();
+      h.cubit.setForeground(true);
+      await h.cubit.load();
+      h.scheduler.pending.clear();
+      h.calls.clear();
+
+      await tester.pump(const Duration(milliseconds: 999));
+      expect(h.calls, isEmpty);
+      expect(h.cubit.state.reminders.single.isEnabled, isTrue);
+      await tester.pump(const Duration(milliseconds: 1));
+      await tester.pump();
+      expect(h.cubit.state.reminders.single.isEnabled, isFalse);
+      expect(h.calls, ['readAll', 'pending', 'completeOnce']);
+      h.calls.clear();
+      await tester.pump(const Duration(seconds: 2));
+      expect(h.calls, isEmpty);
+    });
+
+    testWidgets('pausing and closing cancel completion polling', (
+      tester,
+    ) async {
+      final h = build();
+      await h.cubit.load();
+      h.cubit.setForeground(true);
+      h.cubit.setForeground(false);
+      h.scheduler.pending.clear();
+      h.calls.clear();
+
+      await tester.pump(const Duration(seconds: 2));
+      expect(h.calls, isEmpty);
+      expect(h.cubit.state.reminders.single.isEnabled, isTrue);
+      h.cubit.setForeground(true);
+      await h.cubit.close();
+      await tester.pump(const Duration(seconds: 2));
+      expect(h.calls, isEmpty);
+      expect(tester.takeException(), isNull);
+    });
+
+    testWidgets(
+      'a Snooze schedule event reloads a completed one-off and resumes polling',
+      (tester) async {
+        final changes = StreamController<void>.broadcast(sync: true);
+        addTearDown(changes.close);
+        final h = build(scheduleChanges: changes.stream);
+        h.scheduler.pending.clear();
+        h.cubit.setForeground(true);
+        await h.cubit.load();
+        expect(h.cubit.state.reminders.single.isEnabled, isFalse);
+        h.calls.clear();
+        await tester.pump(const Duration(seconds: 2));
+        expect(h.calls, isEmpty);
+
+        expect(await h.store.reactivateOnce('r1', 1), isTrue);
+        h.scheduler.pending.add('r1');
+        h.calls.clear();
+        changes.add(null);
+        await tester.pump();
+        await tester.pump();
+        expect(h.cubit.state.reminders.single.isEnabled, isTrue);
+        expect(h.calls, ['readAll', 'pending']);
+        h.calls.clear();
+        await tester.pump(const Duration(seconds: 1));
+        await tester.pump();
+        expect(h.calls, ['readAll', 'pending']);
+
+        await h.cubit.close();
+        expect(changes.hasListener, isFalse);
+        h.calls.clear();
+        changes.add(null);
+        await tester.pump(const Duration(seconds: 2));
+        expect(h.calls, isEmpty);
+        expect(tester.takeException(), isNull);
+      },
+    );
+  });
+
   test(
     'startup restores interval schedules without rearming ordinary reminders',
     () async {
@@ -180,9 +506,6 @@ void main() {
       expect((await repository.getAll()).single.isEnabled, isFalse);
     },
   );
-  // The write-then-schedule invariant and the undo sortOrder pin are the only
-  // two pieces of logic here that are not a straight pass-through, so they are
-  // the only two worth a test.
   group('SqfliteReminderRepository keeps the row and the schedule in step', () {
     test(
       'upsert writes the row before it schedules the notification',
